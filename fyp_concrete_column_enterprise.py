@@ -18,7 +18,6 @@ st.markdown("""
     .main { background-color: #f8f9fa; }
     h1, h2, h3 { color: #2c3e50; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
     .metric-container { background-color: white; padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 15px;}
-    """
     </style>
 """, unsafe_allow_html=True)
 
