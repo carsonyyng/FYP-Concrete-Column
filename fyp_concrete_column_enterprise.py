@@ -20,7 +20,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 5. ROLE-BASED AUTHENTICATION ---
+# --- 5. ROLE-BASED AUTHENTICATION & SIDEBAR ---
 if 'role' not in st.session_state:
     st.session_state['role'] = 'Viewer'
 
@@ -38,6 +38,11 @@ with st.sidebar:
         st.session_state['role'] = 'Viewer'
     else:
         st.info("Please log in to edit data.")
+        
+    st.markdown("---")
+    st.header("🛠️ Dashboard Controls")
+    stages = ["All", "Not Started", "In Progress", "Drilled", "Completed"]
+    selected_stage = st.selectbox("Filter Site Plan by Stage", stages)
 
 st.title("🏢 Enterprise Digital Twin: Concrete Columns")
 st.markdown("---")
@@ -86,6 +91,11 @@ def load_data():
     return df
 
 df = load_data()
+
+# Filter dataframe based on sidebar
+filtered_df = df.copy()
+if selected_stage != "All":
+    filtered_df = filtered_df[filtered_df['Construction_Stage'] == selected_stage]
 
 def format_mpd(val):
     try:
@@ -160,10 +170,9 @@ else:
     progress_pct = (completed_cols / total_cols) * 100 if total_cols > 0 else 0
     
     st.markdown("### 📈 Project Metrics & Predictive Forecasting")
-    top_col1, top_col2, top_col3 = st.columns([1, 1.2, 1.2])
+    top_col1, top_col2, top_col3, top_col4 = st.columns([1, 1, 1.2, 1.2])
     
     with top_col1:
-        # --- RESTORED GAUGE CHART ---
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
         fig_gauge = go.Figure(go.Indicator(
             mode = "gauge+number",
@@ -188,8 +197,31 @@ else:
         st.metric("Total Injected Volume", f"{total_vol:.2f} m³")
         st.metric("Remaining Columns", f"{remaining_cols} nos out of {total_cols}")
         st.markdown("</div>", unsafe_allow_html=True)
-        
+
     with top_col3:
+        st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
+        st.markdown("**📅 Period Analysis**")
+        today = datetime.date.today()
+        start_default = today.replace(day=1)
+        date_range = st.date_input("Filter Production Range", value=(start_default, today), format="YYYY-MM-DD")
+        
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+            pd_start, pd_end = pd.to_datetime(start_date), pd.to_datetime(end_date)
+            
+            drill_dates = pd.to_datetime(df['Drill Completed Date\n(DD/MM/YYYY)'], errors='coerce')
+            conc_dates = pd.to_datetime(df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce')
+            
+            drilled_mask = (drill_dates >= pd_start) & (drill_dates <= pd_end)
+            concreted_mask = (conc_dates >= pd_start) & (conc_dates <= pd_end)
+            
+            st.metric("Holes Drilled", drilled_mask.sum())
+            st.metric("Concreted", concreted_mask.sum())
+        else:
+            st.warning("Select range.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+    with top_col4:
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
         st.markdown("**Predictive Completion Timeline**")
         
@@ -223,25 +255,31 @@ else:
         color_map = {"Not Started": "lightgrey", "In Progress": "#f1c40f", "Drilled": "#3498db", "Completed": "#2ecc71"}
         tab1, tab2 = st.tabs(["2D Grid Plan View", "3D Column Foundation Model"])
         with tab1:
-            fig2d = px.scatter(df, x='X_Coord', y='Y_Coord', color='Construction_Stage', color_discrete_map=color_map, hover_name='Concrete Column ID')
-            fig2d.update_traces(marker=dict(size=16, line=dict(width=1, color='DarkSlateGrey')))
-            fig2d.update_yaxes(scaleanchor="x", scaleratio=1)
-            fig2d.update_layout(height=650, plot_bgcolor='white', paper_bgcolor='white')
-            fig2d.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGrey')
-            fig2d.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGrey')
-            st.plotly_chart(fig2d, use_container_width=True)
+            if not filtered_df.empty:
+                fig2d = px.scatter(filtered_df, x='X_Coord', y='Y_Coord', color='Construction_Stage', color_discrete_map=color_map, hover_name='Concrete Column ID')
+                fig2d.update_traces(marker=dict(size=16, line=dict(width=1, color='DarkSlateGrey')))
+                fig2d.update_yaxes(scaleanchor="x", scaleratio=1)
+                fig2d.update_layout(height=650, plot_bgcolor='white', paper_bgcolor='white')
+                fig2d.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGrey')
+                fig2d.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGrey')
+                st.plotly_chart(fig2d, use_container_width=True)
+            else:
+                st.info("No data available for this filter.")
             
         with tab2:
-            fig3d = px.scatter_3d(df, x='X_Coord', y='Y_Coord', z='Tentative Concrete Column Bottom level \n(mPD)', color='Construction_Stage', color_discrete_map=color_map, hover_name='Concrete Column ID')
-            for i, row in df.iterrows():
-                bottom_z = row['Actual Founding level']
-                if pd.isna(bottom_z): bottom_z = row['Tentative Concrete Column Bottom level \n(mPD)']
-                if pd.isna(bottom_z): bottom_z = 0 
-                top_z = row['Cut off level (mPD)']
-                if pd.isna(top_z): top_z = 10 
-                fig3d.add_scatter3d(x=[row['X_Coord'], row['X_Coord']], y=[row['Y_Coord'], row['Y_Coord']], z=[top_z, bottom_z], mode='lines', line=dict(color=color_map.get(row['Construction_Stage'], 'grey'), width=8), showlegend=False)
-            fig3d.update_layout(scene=dict(zaxis=dict(title='Depth (mPD)'), xaxis=dict(title='X Grid'), yaxis=dict(title='Y Grid')), height=650)
-            st.plotly_chart(fig3d, use_container_width=True)
+            if not filtered_df.empty:
+                fig3d = px.scatter_3d(filtered_df, x='X_Coord', y='Y_Coord', z='Tentative Concrete Column Bottom level \n(mPD)', color='Construction_Stage', color_discrete_map=color_map, hover_name='Concrete Column ID')
+                for i, row in filtered_df.iterrows():
+                    bottom_z = row['Actual Founding level']
+                    if pd.isna(bottom_z): bottom_z = row['Tentative Concrete Column Bottom level \n(mPD)']
+                    if pd.isna(bottom_z): bottom_z = 0 
+                    top_z = row['Cut off level (mPD)']
+                    if pd.isna(top_z): top_z = 10 
+                    fig3d.add_scatter3d(x=[row['X_Coord'], row['X_Coord']], y=[row['Y_Coord'], row['Y_Coord']], z=[top_z, bottom_z], mode='lines', line=dict(color=color_map.get(row['Construction_Stage'], 'grey'), width=8), showlegend=False)
+                fig3d.update_layout(scene=dict(zaxis=dict(title='Depth (mPD)'), xaxis=dict(title='X Grid'), yaxis=dict(title='Y Grid')), height=650)
+                st.plotly_chart(fig3d, use_container_width=True)
+            else:
+                st.info("No data available for this filter.")
 
     with col_data:
         st.markdown("### 📝 Record As-Built Data")
@@ -352,7 +390,7 @@ else:
     # --- RESTORED ADVANCED DATA VIEW ---
     st.markdown("---")
     with st.expander("📂 View Complete Database (As-Built vs Design)"):
-        display_df = df.copy()
+        display_df = filtered_df.copy()
         for mPD_col in ['Ground Level', 'Casing Top Level\n(mPD)', 'Foundation level\n(mPD)', 'Actual Founding level', 'Concrete Top Level (mPD)']:
             if mPD_col in display_df.columns:
                 display_df[mPD_col] = display_df[mPD_col].apply(lambda x: f"{x:+.3f}" if pd.notna(x) and str(x).strip()!="" else "")
