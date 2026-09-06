@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -154,7 +153,6 @@ def generate_excel_report(col_data):
 if df.empty:
     st.error("No data.")
 else:
-    # --- 3. PREDICTIVE PROJECT FORECASTING ---
     total_cols = len(df)
     completed_df = df[df['Construction_Stage'] == 'Completed'].copy()
     completed_cols = len(completed_df)
@@ -162,12 +160,25 @@ else:
     progress_pct = (completed_cols / total_cols) * 100 if total_cols > 0 else 0
     
     st.markdown("### 📈 Project Metrics & Predictive Forecasting")
-    top_col1, top_col2, top_col3 = st.columns([1, 1, 1.5])
+    top_col1, top_col2, top_col3 = st.columns([1, 1.2, 1.2])
     
     with top_col1:
+        # --- RESTORED GAUGE CHART ---
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-        st.metric("Total Clusters", f"{total_cols} nos")
-        st.metric("Completed", f"{completed_cols} nos", f"{progress_pct:.1f}%")
+        fig_gauge = go.Figure(go.Indicator(
+            mode = "gauge+number",
+            value = progress_pct,
+            number = {'suffix': "%", 'valueformat': '.1f', 'font': {'size': 35, 'color': '#2c3e50'}},
+            title = {'text': "Site Completion", 'font': {'size': 16}},
+            gauge = {
+                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                'bar': {'color': "#27ae60"},
+                'bgcolor': "#ecf0f1",
+                'shape': "angular",
+            }
+        ))
+        fig_gauge.update_layout(height=200, margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig_gauge, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
         
     with top_col2:
@@ -175,14 +186,13 @@ else:
         vol_col = 'Actual Concrete Volumn (m3)'
         total_vol = pd.to_numeric(df[vol_col], errors='coerce').sum() if vol_col in df.columns else 0.0
         st.metric("Total Injected Volume", f"{total_vol:.2f} m³")
-        st.metric("Remaining Columns", f"{remaining_cols} nos")
+        st.metric("Remaining Columns", f"{remaining_cols} nos out of {total_cols}")
         st.markdown("</div>", unsafe_allow_html=True)
         
     with top_col3:
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
         st.markdown("**Predictive Completion Timeline**")
         
-        # Calculate run rate
         if not completed_df.empty and 'Concrete Date\n(DD/MM/YYYY)' in completed_df.columns:
             completed_df['Concrete Date'] = pd.to_datetime(completed_df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce')
             valid_dates = completed_df.dropna(subset=['Concrete Date']).sort_values('Concrete Date')
@@ -260,7 +270,6 @@ else:
                 
                 concrete_vol = st.number_input("Actual Concrete Volume (m3)", value=get_val('Actual Concrete Volumn (m3)'), format="%.3f")
                 
-                # --- 6. PHOTOGRAPHIC EVIDENCE ---
                 st.markdown("##### 📷 Site Photographs (Optional)")
                 site_photo = st.file_uploader("Upload Casing / Pouring Photo", type=['jpg', 'png', 'jpeg'])
                 
@@ -272,7 +281,6 @@ else:
                 submitted = st.form_submit_button("✅ Update System Record")
                 
                 if submitted:
-                    # --- 2. AUTOMATED QA/QC VALIDATION ---
                     qa_passed = True
                     if act_founding > ground_level:
                         st.error("🚨 **QA/QC Error:** Actual Founding Level cannot be strictly higher than Ground Level. Submission blocked.")
@@ -341,3 +349,20 @@ else:
             else:
                 st.info("Export features are restricted to Admin users.")
 
+    # --- RESTORED ADVANCED DATA VIEW ---
+    st.markdown("---")
+    with st.expander("📂 View Complete Database (As-Built vs Design)"):
+        display_df = df.copy()
+        for mPD_col in ['Ground Level', 'Casing Top Level\n(mPD)', 'Foundation level\n(mPD)', 'Actual Founding level', 'Concrete Top Level (mPD)']:
+            if mPD_col in display_df.columns:
+                display_df[mPD_col] = display_df[mPD_col].apply(lambda x: f"{x:+.3f}" if pd.notna(x) and str(x).strip()!="" else "")
+
+        columns_to_show = [c for c in [
+            'Concrete Column ID', 'Construction_Stage', 
+            'Drill Start Date \n(DD/MM/YYYY)', 'Ground Level', 'Casing Top Level\n(mPD)',
+            'Concrete Top Level (mPD)', 'As-built casing Length (m)',
+            'Foundation level\n(mPD)', 'Actual Founding level', 
+            'Actual Concrete Volumn (m3)', 'Concrete Date\n(DD/MM/YYYY)'
+        ] if c in display_df.columns]
+        
+        st.dataframe(display_df[columns_to_show], use_container_width=True, height=300)
