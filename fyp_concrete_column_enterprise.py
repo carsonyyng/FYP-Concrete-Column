@@ -45,6 +45,21 @@ with st.sidebar:
     selected_stage = st.selectbox("Filter Site Plan by Stage", stages)
 
 st.title("🏢 Enterprise Digital Twin: Concrete Columns")
+
+# --- NEW: METHOD STATEMENT WINDOW ---
+with st.expander("📋 View Method Statement & General Procedure"):
+    st.markdown("""
+    ### General Construction Procedure for Concrete Columns (610mm Ø)
+    
+    1. **Setting Out:** Surveyor sets out the column position (X/Y coordinates) based on approved construction drawings.
+    2. **Casing Installation:** Pitch and drive the 610mm temporary steel casing into the ground to the required casing top and toe levels to prevent soil collapse.
+    3. **Drilling & Excavation:** Drill through the soil and alluvium layers into the Completely Decomposed Granite (CDG) until the actual founding level is reached.
+    4. **Inspection & Measurement:** Site Engineer records the *Actual Toe Level* and *Actual Founding Level*, determining the socket length into the CD material.
+    5. **Hole Cleaning:** Clean the base of the drilled hole (e.g., using an air-lift method) to remove loose debris and sediment.
+    6. **Concreting:** Pour **C45/20D** grade concrete using a tremie pipe. The engineer records the *Actual Concrete Volume* and compares it against the theoretical volume to calculate the **Overbreak %**.
+    7. **Casing Extraction:** Slowly extract the temporary casing, ensuring the final *Concrete Top Level* is maintained at least 1.0m above the design Cut-off Level.
+    """)
+
 st.markdown("---")
 
 # Robust Load data
