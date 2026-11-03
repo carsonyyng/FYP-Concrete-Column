@@ -185,6 +185,13 @@ def load_data():
     df['NC_Shifts'] = pd.to_numeric(df['NC_Shifts'], errors='coerce').fillna(0).astype(int)
     df['No_of_Casings'] = pd.to_numeric(df['No_of_Casings'], errors='coerce').fillna(4.0)
     
+    # Extract Borehole Cluster Prefix
+    def get_cluster(cid):
+        if pd.isna(cid): return 'Unknown'
+        p = str(cid).split('_')
+        return p[0] if len(p) > 0 else 'Unknown'
+    df['Borehole_Cluster'] = df['Concrete Column ID'].apply(get_cluster)
+
     df = df.sort_values(by='Concrete Column ID').reset_index(drop=True)
     grid_cols = int(np.ceil(np.sqrt(len(df)))) if len(df) > 0 else 1
     spacing = 15.0
@@ -200,7 +207,7 @@ def load_data():
         df['Construction_Stage'] = "Not Started"
     return df
 
-# --- SELF-CONTAINED QUANTITY SURVEYING (QS), EVM & SUBCONTRACTOR BACK-CHARGE ENGINE ---
+# --- QUANTITY SURVEYING (QS), EVM & SUBCONTRACTOR BACK-CHARGE ENGINE ---
 def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate, cap_pct=15.0, admin_pct=10.0, sub_share_pct=75.0):
     work_df = df_in.copy()
     cutoff = pd.to_numeric(work_df['Cut off level (mPD)'], errors='coerce').fillna(0.875)
@@ -258,7 +265,6 @@ def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate, 
     work_df['Sub_Total_Contra_Charge_HKD'] = np.round(sub_excess_v * contra_unit_rate, 2)
     work_df['Net_MC_Unrecovered_Wastage_HKD'] = np.round(work_df['True_Wastage_Cost_HKD'] - work_df['Sub_Total_Contra_Charge_HKD'], 2)
     
-    # Subcontractor Payment Valuation (Drilling Subcontract Share minus Concrete & Damage Contra-Charges)
     sub_share = sub_share_pct / 100.0
     sub_gross_hkd = np.where(
         work_df['Construction_Stage'] == 'Completed',
@@ -292,7 +298,7 @@ def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate, 
     )
     work_df['Claimable_Var_HKD'] = work_df['Claimable_BOQ_Var_Vol_m3'] * conc_rate + np.where(is_active, (ab_cdg_len - d_cdg) * cdg_rate, 0.0)
     
-    # 4. Plant Productivity & Rig Operating Cost per Drilled Meter (HK$/m)
+    # 4. Plant Productivity & Rig Cost per Meter
     work_df['Drilling_Speed_m_hr'] = np.where(is_active & (rig_h > 0), ab_drill_len / rig_h, np.nan)
     work_df['Rig_Cost_per_m_HKD'] = np.where(is_active & (ab_drill_len > 0), (rig_h * rig_rate) / ab_drill_len, np.nan)
     
@@ -340,7 +346,7 @@ def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate, 
     }
     return work_df, qs_sum
 
-# --- SELF-CONTAINED DOCUMENT & IPA GENERATORS ---
+# --- EXPORT GENERATORS ---
 def format_mpd(val):
     try: return f"{float(val):+.3f}" if pd.notna(val) and str(val).strip() != "" else ""
     except Exception: return val
@@ -708,12 +714,13 @@ else:
     with col_vis:
         st.markdown("### 🗺️ Spatial Digital Twin, EVM S-Curve & Subcontractor Back-Charge")
         color_map = {"Not Started": "lightgrey", "In Progress": "#f1c40f", "Drilled": "#3498db", "Completed": "#2ecc71"}
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "2D Grid Plan",
             "3D Foundation Model",
             "📈 Time-Phased EVM S-Curve",
             "💰 Column QS & Rig Cost/m",
-            "⚖️ Subcontractor Back-Charge"
+            "⚖️ Subcontractor Back-Charge",
+            "🔥 Cluster Risk Heatmap"
         ])
         
         with tab1:
@@ -806,7 +813,6 @@ else:
                 st.info("Complete columns to view commercial breakdown.")
 
         with tab5:
-            # --- NEW TAB 5: SUBCONTRACTOR BACK-CHARGE & PAIN-SHARE ANALYTICS ---
             comp_viz = df[df['Construction_Stage'] == 'Completed'].copy()
             if not comp_viz.empty:
                 fig_cap = go.Figure()
@@ -850,6 +856,42 @@ else:
                 st.plotly_chart(fig_rec, use_container_width=True)
             else:
                 st.info("No completed columns available for Subcontractor Back-Charge analysis.")
+
+        with tab6:
+            # --- NEW STEP 2 TAB 6: BOREHOLE CLUSTER SPATIAL OVERBREAK HEATMAP ---
+            st.markdown("### 🔥 Borehole Cluster Geotechnical Risk & Overbreak Heatmap")
+            st.write("Correlating spatial borehole cluster zones with average concrete overbreak percentage and rockhead depth variations.")
+            
+            cluster_df = df[df['Construction_Stage'] == 'Completed'].groupby('Borehole_Cluster').agg(
+                Completed_Count=('Concrete Column ID', 'count'),
+                Mean_Overbreak_Pct=('True_Overbreak_Pct', 'mean'),
+                Max_Overbreak_Pct=('True_Overbreak_Pct', 'max'),
+                Mean_Founding_Level=('Actual Founding level', 'mean'),
+                Mean_X=('X_Coord', 'mean'),
+                Mean_Y=('Y_Coord', 'mean')
+            ).reset_index()
+            
+            if not cluster_df.empty:
+                fig_heat = px.scatter(
+                    cluster_df, x='Mean_X', y='Mean_Y', size='Mean_Overbreak_Pct', color='Mean_Overbreak_Pct',
+                    hover_name='Borehole_Cluster', text='Borehole_Cluster',
+                    color_continuous_scale='Reds', size_max=45,
+                    labels={'Mean_Overbreak_Pct': 'Mean Overbreak (%)', 'Mean_X': 'Site X Coordinate (m)', 'Mean_Y': 'Site Y Coordinate (m)'},
+                    title="Spatial Borehole Cluster Risk Heatmap (Bubble Size & Color = Mean Overbreak %)"
+                )
+                fig_heat.update_traces(textposition='top center')
+                fig_heat.update_layout(height=420, plot_bgcolor='white')
+                st.plotly_chart(fig_heat, use_container_width=True)
+                
+                st.dataframe(cluster_df.rename(columns={
+                    'Borehole_Cluster': 'Cluster Zone',
+                    'Completed_Count': 'Completed Piles',
+                    'Mean_Overbreak_Pct': 'Mean Overbreak (%)',
+                    'Max_Overbreak_Pct': 'Max Overbreak (%)',
+                    'Mean_Founding_Level': 'Mean Founding Lvl (mPD)'
+                }), use_container_width=True)
+            else:
+                st.info("Complete more columns across different clusters to view the spatial heatmap.")
 
     with col_data:
         st.markdown("### 📝 Record As-Built & Plant Data")
@@ -933,7 +975,7 @@ else:
                         st.success(f"Column {selected_col} updated! QS & Subcontractor Contra-Charge logs refreshed.")
                         st.rerun()
 
-            # --- SELF-CONTAINED EXPORT DOCUMENTATION ---
+            # --- EXPORT DOCUMENTATION ---
             st.markdown("### 📄 Commercial & Engineering Exports")
             if st.session_state['role'] == 'Admin':
                 ex1, ex2, ex3, ex4 = st.tabs(["💰 IPA & Contra-Charge (.xlsx)", "📄 HKBD PDF", "📥 Single Excel", "📦 Batch ZIP"])
@@ -990,8 +1032,8 @@ else:
     st.markdown("---")
     with st.expander("📂 View Complete Database (Engineering, QS Valuation, Subcontractor Back-Charge & Audit Trail)"):
         cols_show = [c for c in [
-            'Concrete Column ID', 'Construction_Stage', 'AsBuilt_Cylinder_Vol_m3', 'Actual Concrete Volumn (m3)',
-            'True_Radial_Overbreak_Vol_m3', 'Allowed_Wastage_Cap_Vol_m3', 'MC_Absorbed_Overbreak_Vol_m3',
+            'Concrete Column ID', 'Construction_Stage', 'Borehole_Cluster', 'AsBuilt_Cylinder_Vol_m3', 'Actual Concrete Volumn (m3)',
+            'True_Radial_Overbreak_Vol_m3', 'True_Overbreak_Pct', 'Allowed_Wastage_Cap_Vol_m3', 'MC_Absorbed_Overbreak_Vol_m3',
             'Sub_Backcharge_Vol_m3', 'True_Wastage_Cost_HKD', 'Sub_Total_Contra_Charge_HKD',
             'Net_MC_Unrecovered_Wastage_HKD', 'Sub_Gross_Valuation_HKD', 'Sub_Net_Payable_HKD',
             'Rig_Hours', 'NC_Shifts', 'Equipment_Damage', 'Repair_Cost_HKD', 'Last_Edited_By', 'Timestamp_of_Edit'
