@@ -25,8 +25,9 @@ st.markdown("""
     .main { background-color: #f8f9fa; }
     h1, h2, h3 { color: #2c3e50; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
     .metric-container { background-color: white; padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.08); margin-bottom: 15px;}
-    .cost-alert { color: #c0392b; font-weight: bold; font-size: 1.05em; }
-    .claim-good { color: #1e8449; font-weight: bold; font-size: 1.05em; }
+    .cost-alert { color: #c0392b; font-weight: bold; font-size: 1.02em; }
+    .claim-good { color: #1e8449; font-weight: bold; font-size: 1.02em; }
+    .contra-recover { color: #2874a6; font-weight: bold; font-size: 1.02em; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -62,11 +63,17 @@ with st.sidebar:
     selected_stage = st.selectbox("Filter Site Plan by Stage", stages)
     
     st.markdown("---")
-    st.header("💰 Commercial & BOQ Rates (HKSMM4)")
+    st.header("💰 Main Contract BOQ Rates (HKSMM4)")
     concrete_unit_cost = st.number_input("C45/20D Concrete Rate (HKD/m³)", value=1200.0, step=50.0)
     soil_drill_rate = st.number_input("Soil / Alluvium Drilling (HKD/m)", value=2800.0, step=100.0)
     cdg_drill_rate = st.number_input("Extra-Over CDG Socket (HKD/m)", value=4500.0, step=100.0)
     rig_hourly_rate = st.number_input("Piling Rig Operating Cost (HKD/hr)", value=1800.0, step=100.0)
+
+    st.markdown("---")
+    st.header("⚖️ Subcontract Back-Charge Terms")
+    wastage_cap_pct = st.slider("Free-Issue Wastage Allowance Cap (%)", min_value=0.0, max_value=40.0, value=15.0, step=1.0)
+    admin_markup_pct = st.slider("Contra-Charge Admin / Handling Fee (%)", min_value=0.0, max_value=25.0, value=10.0, step=1.0)
+    sub_rate_share_pct = st.slider("Subcontractor Drilling BOQ Share (%)", min_value=50.0, max_value=95.0, value=75.0, step=5.0)
 
 st.title("🏢 Enterprise Digital Twin: Scheduling, Engineering & QS Cost Control")
 
@@ -84,7 +91,7 @@ with st.expander("📋 View Method Statement & General Procedure"):
 
 st.markdown("---")
 
-# --- DATA LOADING & SANITIZATION (FIXES GHOST ROW 242 & RESTORES THEORETICAL VOLUME) ---
+# --- DATA LOADING & SANITIZATION ---
 @st.cache_data(show_spinner=False)
 def load_data():
     if os.path.exists("FYP_Concrete_Column_Data_v2.csv"):
@@ -193,8 +200,8 @@ def load_data():
         df['Construction_Stage'] = "Not Started"
     return df
 
-# --- SELF-CONTAINED QUANTITY SURVEYING (QS) & EVM ENGINE ---
-def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate):
+# --- SELF-CONTAINED QUANTITY SURVEYING (QS), EVM & SUBCONTRACTOR BACK-CHARGE ENGINE ---
+def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate, cap_pct=15.0, admin_pct=10.0, sub_share_pct=75.0):
     work_df = df_in.copy()
     cutoff = pd.to_numeric(work_df['Cut off level (mPD)'], errors='coerce').fillna(0.875)
     alluv = pd.to_numeric(work_df['Alluvium Bottom\n(mPD)'], errors='coerce').fillna(-31.0)
@@ -225,13 +232,43 @@ def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate):
     work_df['AsBuilt_Drill_Len_m'] = np.round(ab_drill_len, 3)
     work_df['AsBuilt_Cylinder_Vol_m3'] = np.round(ab_theo_v, 3)
     
-    # 2A. Split Claimable BOQ Depth Variation vs. True Radial Overbreak
+    # 1. Split Claimable BOQ Depth Variation vs. True Radial Overbreak
     work_df['Claimable_BOQ_Var_Vol_m3'] = np.where(is_comp, ab_theo_v - theo_v, 0.0)
-    work_df['True_Radial_Overbreak_Vol_m3'] = np.where(is_comp, np.maximum(0.0, act_v - ab_theo_v), 0.0)
+    true_ob_v = np.where(is_comp, np.maximum(0.0, act_v - ab_theo_v), 0.0)
+    work_df['True_Radial_Overbreak_Vol_m3'] = np.round(true_ob_v, 3)
     work_df['Apparent_Overbreak_Pct'] = np.where(is_comp & (theo_v > 0), ((act_v - theo_v) / theo_v) * 100.0, 0.0)
-    work_df['True_Overbreak_Pct'] = np.where(is_comp & (ab_theo_v > 0), ((act_v - ab_theo_v) / ab_theo_v) * 100.0, 0.0)
+    work_df['True_Overbreak_Pct'] = np.where(is_comp & (ab_theo_v > 0), (true_ob_v / ab_theo_v) * 100.0, 0.0)
     
-    # 2B. Multi-Rate BOQ Valuations
+    # 2. Subcontractor Free-Issue Concrete Cap & Back-Charge (Contra-Charge) Engine
+    contra_unit_rate = conc_rate * (1.0 + admin_pct / 100.0)
+    allowed_cap_v = np.where(is_comp, ab_theo_v * (cap_pct / 100.0), 0.0)
+    max_free_v = np.where(is_comp, ab_theo_v * (1.0 + cap_pct / 100.0), 0.0)
+    mc_absorbed_v = np.where(is_comp, np.minimum(true_ob_v, allowed_cap_v), 0.0)
+    sub_excess_v = np.where(is_comp, np.maximum(0.0, true_ob_v - allowed_cap_v), 0.0)
+    
+    work_df['Allowed_Wastage_Cap_Vol_m3'] = np.round(allowed_cap_v, 3)
+    work_df['Max_Free_Issue_Vol_m3'] = np.round(max_free_v, 3)
+    work_df['MC_Absorbed_Overbreak_Vol_m3'] = np.round(mc_absorbed_v, 3)
+    work_df['Sub_Backcharge_Vol_m3'] = np.round(sub_excess_v, 3)
+    
+    work_df['True_Wastage_Cost_HKD'] = np.round(true_ob_v * conc_rate, 2)
+    work_df['MC_Absorbed_Wastage_HKD'] = np.round(mc_absorbed_v * conc_rate, 2)
+    work_df['Sub_Contra_Base_HKD'] = np.round(sub_excess_v * conc_rate, 2)
+    work_df['Sub_Contra_Admin_Fee_HKD'] = np.round(sub_excess_v * conc_rate * (admin_pct / 100.0), 2)
+    work_df['Sub_Total_Contra_Charge_HKD'] = np.round(sub_excess_v * contra_unit_rate, 2)
+    work_df['Net_MC_Unrecovered_Wastage_HKD'] = np.round(work_df['True_Wastage_Cost_HKD'] - work_df['Sub_Total_Contra_Charge_HKD'], 2)
+    
+    # Subcontractor Payment Valuation (Drilling Subcontract Share minus Concrete & Damage Contra-Charges)
+    sub_share = sub_share_pct / 100.0
+    sub_gross_hkd = np.where(
+        work_df['Construction_Stage'] == 'Completed',
+        (d_soil * soil_rate * sub_share) + (ab_cdg_len * cdg_rate * sub_share),
+        np.where(work_df['Construction_Stage'] == 'Drilled', ((d_soil * soil_rate * sub_share) + (ab_cdg_len * cdg_rate * sub_share)) * 0.80, 0.0)
+    )
+    work_df['Sub_Gross_Valuation_HKD'] = np.round(sub_gross_hkd, 2)
+    work_df['Sub_Net_Payable_HKD'] = np.round(sub_gross_hkd - work_df['Sub_Total_Contra_Charge_HKD'] - rep_c, 2)
+    
+    # 3. Main Contract BOQ Valuations & EVM
     work_df['Baseline_Budget_HKD'] = d_soil * soil_rate + d_cdg * cdg_rate + theo_v * conc_rate
     w = np.where(work_df['Construction_Stage'] == 'Completed', 1.0,
         np.where(work_df['Construction_Stage'] == 'Drilled', 0.60,
@@ -243,34 +280,57 @@ def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate):
         d_soil * soil_rate + ab_cdg_len * cdg_rate + ab_theo_v * conc_rate,
         np.where(work_df['Construction_Stage'] == 'Drilled', d_soil * soil_rate + ab_cdg_len * cdg_rate, 0.0)
     )
+    work_df['Actual_Cost_Gross_HKD'] = np.where(
+        is_active,
+        (d_soil * soil_rate * sub_share) + (ab_cdg_len * cdg_rate * sub_share) + (act_v * conc_rate) + (rig_h * rig_rate) + rep_c,
+        0.0
+    )
     work_df['Actual_Cost_HKD'] = np.where(
         is_active,
-        (d_soil * soil_rate * 0.85) + (ab_cdg_len * cdg_rate * 0.85) + (act_v * conc_rate) + (rig_h * rig_rate) + rep_c,
+        work_df['Actual_Cost_Gross_HKD'] - work_df['Sub_Total_Contra_Charge_HKD'],
         0.0
     )
     work_df['Claimable_Var_HKD'] = work_df['Claimable_BOQ_Var_Vol_m3'] * conc_rate + np.where(is_active, (ab_cdg_len - d_cdg) * cdg_rate, 0.0)
-    work_df['True_Wastage_Cost_HKD'] = work_df['True_Radial_Overbreak_Vol_m3'] * conc_rate
     
-    # 2C. Plant Productivity & Rig Operating Cost per Drilled Meter (HK$/m)
+    # 4. Plant Productivity & Rig Operating Cost per Drilled Meter (HK$/m)
     work_df['Drilling_Speed_m_hr'] = np.where(is_active & (rig_h > 0), ab_drill_len / rig_h, np.nan)
     work_df['Rig_Cost_per_m_HKD'] = np.where(is_active & (ab_drill_len > 0), (rig_h * rig_rate) / ab_drill_len, np.nan)
     
     total_ev = float(work_df['Earned_Value_HKD'].sum())
-    total_ac = float(work_df['Actual_Cost_HKD'].sum())
+    total_ac_gross = float(work_df['Actual_Cost_Gross_HKD'].sum())
+    total_ac_net = float(work_df['Actual_Cost_HKD'].sum())
     total_pv = float(work_df['Baseline_Budget_HKD'].iloc[:15].sum())
+    
+    gross_wastage_hkd = float(work_df['True_Wastage_Cost_HKD'].sum())
+    sub_contra_hkd = float(work_df['Sub_Total_Contra_Charge_HKD'].sum())
+    net_mc_wastage_hkd = float(work_df['Net_MC_Unrecovered_Wastage_HKD'].sum())
+    recovery_ratio_pct = (sub_contra_hkd / gross_wastage_hkd * 100.0) if gross_wastage_hkd > 0 else 0.0
     
     qs_sum = {
         'total_bac_hkd': float(work_df['Baseline_Budget_HKD'].sum()),
         'total_pv_hkd': total_pv,
         'total_ev_hkd': total_ev,
-        'total_ac_hkd': total_ac,
+        'total_ac_gross_hkd': total_ac_gross,
+        'total_ac_hkd': total_ac_net,
         'total_claimable_ipa_hkd': float(work_df['Claimable_BOQ_Value_HKD'].sum()),
-        'cpi': total_ev / total_ac if total_ac > 0 else 1.0,
+        'cpi_gross': total_ev / total_ac_gross if total_ac_gross > 0 else 1.0,
+        'cpi': total_ev / total_ac_net if total_ac_net > 0 else 1.0,
         'spi': total_ev / total_pv if total_pv > 0 else 1.0,
         'claimable_conc_var_m3': float(work_df['Claimable_BOQ_Var_Vol_m3'].sum()),
         'true_overbreak_m3': float(work_df['True_Radial_Overbreak_Vol_m3'].sum()),
+        'allowed_cap_m3': float(work_df['Allowed_Wastage_Cap_Vol_m3'].sum()),
+        'mc_absorbed_m3': float(work_df['MC_Absorbed_Overbreak_Vol_m3'].sum()),
+        'sub_backcharge_m3': float(work_df['Sub_Backcharge_Vol_m3'].sum()),
         'claimable_var_hkd': float(work_df['Claimable_Var_HKD'].sum()),
-        'true_wastage_hkd': float(work_df['True_Wastage_Cost_HKD'].sum()),
+        'true_wastage_hkd': gross_wastage_hkd,
+        'sub_contra_base_hkd': float(work_df['Sub_Contra_Base_HKD'].sum()),
+        'sub_contra_admin_hkd': float(work_df['Sub_Contra_Admin_Fee_HKD'].sum()),
+        'sub_contra_total_hkd': sub_contra_hkd,
+        'net_mc_wastage_hkd': net_mc_wastage_hkd,
+        'wastage_recovery_pct': recovery_ratio_pct,
+        'contra_unit_rate_hkd': contra_unit_rate,
+        'sub_gross_val_hkd': float(work_df['Sub_Gross_Valuation_HKD'].sum()),
+        'sub_net_payable_hkd': float(work_df['Sub_Net_Payable_HKD'].sum()),
         'total_repair_hkd': float(rep_c.sum()),
         'damaged_casings_count': int((work_df['Equipment_Damage'].astype(str).str.lower() == 'yes').sum()),
         'total_nc_shifts': int(work_df['NC_Shifts'].sum()),
@@ -331,13 +391,13 @@ class PDFReport(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 14)
         self.cell(0, 10, 'Formal Concrete Column Submission (HKBD & QS Standard)', 0, 1, 'C')
-        self.ln(3)
+        self.ln(2)
     def footer(self):
         self.set_y(-20)
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, f'Page {self.page_no()} | Generated by Enterprise Digital Twin', 0, 0, 'C')
 
-def generate_pdf_report(row):
+def generate_pdf_report(row, cap_pct=15.0, admin_pct=10.0):
     pdf = PDFReport()
     pdf.add_page()
     col_id = row.get('Concrete Column ID', 'Unknown')
@@ -353,20 +413,20 @@ def generate_pdf_report(row):
     ctl_val = format_mpd(row.get('Concrete Top Level (mPD)', ''))
     
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 9, f"Column Reference: {col_id}   |   Status: {row.get('Construction_Stage', '')}", 0, 1)
+    pdf.cell(0, 8, f"Column Reference: {col_id}   |   Status: {row.get('Construction_Stage', '')}", 0, 1)
     pdf.set_font("Arial", size=10)
-    pdf.cell(0, 7, f"Drill Start: {ds_val} | Drill End: {de_val} | Concrete Date: {cd_val}", 0, 1)
-    pdf.ln(3)
+    pdf.cell(0, 6, f"Drill Start: {ds_val} | Drill End: {de_val} | Concrete Date: {cd_val}", 0, 1)
+    pdf.ln(2)
     pdf.set_font("Arial", 'B', 11)
-    pdf.cell(0, 8, "1. Surveying & Level Measurements (mPD)", 0, 1)
+    pdf.cell(0, 7, "1. Surveying & Level Measurements (mPD)", 0, 1)
     pdf.set_font("Arial", size=10)
-    pdf.cell(0, 7, f"Ground Level: {gl_val} mPD   |   Cut-off Level: {co_val} mPD", 0, 1)
-    pdf.cell(0, 7, f"Casing Top Level: {ct_val} mPD   |   Actual Toe Level: {at_val} mPD", 0, 1)
-    pdf.cell(0, 7, f"Design Bottom: {tb_val} mPD   |   Actual Founding Level: {af_val} mPD", 0, 1)
-    pdf.cell(0, 7, f"Concrete Top Level: {ctl_val} mPD", 0, 1)
-    pdf.ln(3)
+    pdf.cell(0, 6, f"Ground Level: {gl_val} mPD   |   Cut-off Level: {co_val} mPD", 0, 1)
+    pdf.cell(0, 6, f"Casing Top Level: {ct_val} mPD   |   Actual Toe Level: {at_val} mPD", 0, 1)
+    pdf.cell(0, 6, f"Design Bottom: {tb_val} mPD   |   Actual Founding Level: {af_val} mPD", 0, 1)
+    pdf.cell(0, 6, f"Concrete Top Level: {ctl_val} mPD", 0, 1)
+    pdf.ln(2)
     pdf.set_font("Arial", 'B', 11)
-    pdf.cell(0, 8, "2. Commercial QS Volume & Variance Analysis (HKSMM4)", 0, 1)
+    pdf.cell(0, 7, "2. Commercial QS Volume & Variance Analysis (HKSMM4)", 0, 1)
     pdf.set_font("Arial", size=10)
     est_key = 'Estimate Concrete volume\n(m3)'
     t_vol = float(row.get(est_key, 0) or 0)
@@ -374,22 +434,32 @@ def generate_pdf_report(row):
     a_vol = float(row.get('Actual Concrete Volumn (m3)', 0) or 0)
     boq_var = float(row.get('Claimable_BOQ_Var_Vol_m3', 0) or 0)
     true_ob = float(row.get('True_Radial_Overbreak_Vol_m3', 0) or 0)
-    pdf.cell(0, 7, f"Design Theoretical Volume (+3m allowance): {t_vol:.3f} m3", 0, 1)
-    pdf.cell(0, 7, f"As-Built Cylinder Volume (Re-measured Depth): {ab_vol:.3f} m3", 0, 1)
-    pdf.cell(0, 7, f"Actual Poured Concrete Volume: {a_vol:.3f} m3", 0, 1)
-    pdf.cell(0, 7, f"Claimable BOQ Depth Variation: {boq_var:+.3f} m3   |   True Radial Overbreak (Wastage): {true_ob:.3f} m3", 0, 1)
-    pdf.ln(3)
+    pdf.cell(0, 6, f"Design Theoretical Volume (+3m allowance): {t_vol:.3f} m3", 0, 1)
+    pdf.cell(0, 6, f"As-Built Cylinder Volume (Re-measured Depth): {ab_vol:.3f} m3", 0, 1)
+    pdf.cell(0, 6, f"Actual Poured Concrete Volume: {a_vol:.3f} m3", 0, 1)
+    pdf.cell(0, 6, f"Claimable BOQ Depth Variation: {boq_var:+.3f} m3   |   True Radial Overbreak: {true_ob:.3f} m3", 0, 1)
+    pdf.ln(2)
     pdf.set_font("Arial", 'B', 11)
-    pdf.cell(0, 8, "3. Plant Productivity & Audit Trail", 0, 1)
+    pdf.cell(0, 7, f"3. Subcontractor Free-Issue Concrete Contra-Charge ({cap_pct:.0f}% Cap + {admin_pct:.0f}% Admin Fee)", 0, 1)
+    pdf.set_font("Arial", size=10)
+    cap_v = float(row.get('Allowed_Wastage_Cap_Vol_m3', 0) or 0)
+    sub_ex_v = float(row.get('Sub_Backcharge_Vol_m3', 0) or 0)
+    contra_hkd = float(row.get('Sub_Total_Contra_Charge_HKD', 0) or 0)
+    net_mc_hkd = float(row.get('Net_MC_Unrecovered_Wastage_HKD', 0) or 0)
+    pdf.cell(0, 6, f"Allowed Free-Issue Cap ({cap_pct:.0f}%): {cap_v:.3f} m3   |   Back-Chargeable Excess Vol: {sub_ex_v:.3f} m3", 0, 1)
+    pdf.cell(0, 6, f"Subcontractor Contra-Charge Deduction: HKD ${contra_hkd:,.2f}   |   Net MC Exposure: HKD ${net_mc_hkd:,.2f}", 0, 1)
+    pdf.ln(2)
+    pdf.set_font("Arial", 'B', 11)
+    pdf.cell(0, 7, "4. Plant Productivity & Audit Trail", 0, 1)
     pdf.set_font("Arial", size=10)
     rig_h = row.get('Rig_Hours', 0)
     nc_s = row.get('NC_Shifts', 0)
     cas_n = row.get('No_of_Casings', 4)
     eq_dmg = row.get('Equipment_Damage', 'No')
     rep_c = float(row.get('Repair_Cost_HKD', 0) or 0)
-    pdf.cell(0, 7, f"Rig Hours: {rig_h} hrs (NC Shifts: {nc_s}) | Casings Used: {cas_n} | Damage: {eq_dmg} (HKD ${rep_c:,.2f})", 0, 1)
-    pdf.cell(0, 7, f"Last Edited By: {row.get('Last_Edited_By', 'System/Unknown')}   |   Timestamp: {row.get('Timestamp_of_Edit', '')}", 0, 1)
-    pdf.ln(12)
+    pdf.cell(0, 6, f"Rig Hours: {rig_h} hrs (NC Shifts: {nc_s}) | Casings Used: {cas_n} | Damage: {eq_dmg} (HKD ${rep_c:,.2f})", 0, 1)
+    pdf.cell(0, 6, f"Last Edited By: {row.get('Last_Edited_By', 'System/Unknown')}   |   Timestamp: {row.get('Timestamp_of_Edit', '')}", 0, 1)
+    pdf.ln(10)
     pdf.cell(95, 8, "Prepared By (Site Engineer): ___________________", 0, 0)
     pdf.cell(95, 8, "Certified By (QS / Supervisor): ___________________", 0, 1)
     return pdf.output(dest='S').encode('latin-1'), f"{col_id}_Formal_Report.pdf"
@@ -411,24 +481,25 @@ def generate_ipa_workbook(work_df, qs_summary, rates, period_label="All Active /
     grid_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
     total_border = Border(top=thin_side, bottom=double_bottom, left=thin_side, right=thin_side)
     
+    # --- TAB 1: EXECUTIVE IPA SUMMARY ---
     ws1 = wb.active
     ws1.title = "IPA Summary Certificate"
     ws1.views.sheetView[0].showGridLines = True
-    ws1["A1"] = "INTERIM PAYMENT APPLICATION (IPA) & COMMERCIAL CONTROL SUMMARY"
+    ws1["A1"] = "INTERIM PAYMENT APPLICATION (IPA) & SUBCONTRACTOR CONTRA-CHARGE CERTIFICATE"
     ws1["A1"].font = font_title
     ws1["A2"] = f"Project: 610mm Dia Socketed Concrete Columns (241 Clusters) | Scope: {period_label}"
     ws1["A2"].font = Font(name="Calibri", size=10, italic=True, color="595959")
     
-    ws1["A4"] = "1. CONTRACT BILL OF QUANTITIES (BOQ) UNIT RATES (HKSMM4)"
+    ws1["A4"] = "1. CONTRACT BILL OF QUANTITIES (BOQ) & SUBCONTRACT CONTRA-CHARGE RATES"
     ws1["A4"].font = font_sec
-    for col_idx, h in enumerate(["BOQ Item Ref", "Description", "Unit", "Contract Rate (HKD)"], 1):
+    for col_idx, h in enumerate(["BOQ / Clause Ref", "Description", "Unit", "Rate / Value"], 1):
         c = ws1.cell(5, col_idx, h)
         c.font = font_hdr; c.fill = navy_header; c.alignment = Alignment(horizontal="center")
     rate_rows = [
         ("Item A.1", "Bored Piling / Casing & Drilling through Soil / Alluvium", "m", rates.get('soil', 2800.0)),
         ("Item A.2", "Extra-Over (EO) Drilling into CDG / Rock Socket", "m", rates.get('cdg', 4500.0)),
         ("Item A.3", "Supply & Pour Grade C45/20D Concrete (Tremie Method)", "m3", rates.get('concrete', 1200.0)),
-        ("Internal", "Piling Rig & Crew Operating Cost Allowance", "hr", rates.get('rig', 1800.0)),
+        ("Clause 14.2", f"Subcontract Free-Issue Wastage Cap ({rates.get('cap_pct', 15.0):.0f}%) + {rates.get('admin_pct', 10.0):.0f}% Admin Fee", "m3", qs_summary['contra_unit_rate_hkd']),
     ]
     for r_idx, r_data in enumerate(rate_rows, 6):
         for c_idx, val in enumerate(r_data, 1):
@@ -436,38 +507,36 @@ def generate_ipa_workbook(work_df, qs_summary, rates, period_label="All Active /
             cell.font = font_reg; cell.border = grid_border
             if c_idx == 4: cell.number_format = '"HK$"#,##0.00'
             
-    ws1["A12"] = "2. EARNED VALUE MANAGEMENT (EVM) & QS VARIANCE EXECUTIVE SUMMARY"
+    ws1["A12"] = "2. EARNED VALUE MANAGEMENT (EVM), QS VARIANCE & BACK-CHARGE SUMMARY"
     ws1["A12"].font = font_sec
     for col_idx, h in enumerate(["Commercial Metric", "Current Value", "Benchmark / Status", "QS Analytical Note"], 1):
         c = ws1.cell(13, col_idx, h)
         c.font = font_hdr; c.fill = navy_header; c.alignment = Alignment(horizontal="center")
     kpi_rows = [
         ("Total Baseline Contract Budget (BAC - 241 Columns)", qs_summary['total_bac_hkd'], "100.0% Baseline", "Full contract scope across 10,243.37m design length", '"HK$"#,##0.00'),
-        ("Planned Value to Date (PV)", qs_summary['total_pv_hkd'], "Schedule Target", "Baseline value of scheduled columns", '"HK$"#,##0.00'),
         ("Earned Value to Date (EV)", qs_summary['total_ev_hkd'], f"SPI = {qs_summary['spi']:.2f}", "Budgeted value of physical work accomplished", '"HK$"#,##0.00'),
         ("Gross Certified IPA Valuation (HKSMM4 Re-measured)", qs_summary['total_claimable_ipa_hkd'], "Billable to Client", "Includes claimable CDG depth & concrete variations", '"HK$"#,##0.00'),
-        ("Actual Contractor Cost Incurred (AC)", qs_summary['total_ac_hkd'], f"CPI = {qs_summary['cpi']:.2f}", "Includes actual poured concrete, rig hrs & casing repairs", '"HK$"#,##0.00'),
-        ("Claimable BOQ Depth Variation Value", qs_summary['claimable_var_hkd'], f"{qs_summary['claimable_conc_var_m3']:+.2f} m3 Conc", "Extra payment due to deeper actual founding levels", '"HK$"#,##0.00'),
-        ("Non-Claimable True Overbreak Wastage Loss", qs_summary['true_wastage_hkd'], f"{qs_summary['true_overbreak_m3']:.2f} m3 Excess", "Contractor commercial risk (radial over-excavation)", '"HK$"#,##0.00'),
-        ("Equipment & Casing Damage Repair Cost", qs_summary['total_repair_hkd'], f"{qs_summary['damaged_casings_count']} Incident(s)", "Logged on-site casing damage (e.g. BH12_1_C3)", '"HK$"#,##0.00'),
+        ("Gross True Overbreak Wastage Cost (Before Recovery)", qs_summary['true_wastage_hkd'], f"{qs_summary['true_overbreak_m3']:.2f} m3 Total OB", "Total concrete poured beyond As-Built cylinder", '"HK$"#,##0.00'),
+        ("Subcontractor Contra-Charge Recovered (Beyond Cap)", qs_summary['sub_contra_total_hkd'], f"{qs_summary['wastage_recovery_pct']:.1f}% Recovered", f"{qs_summary['sub_backcharge_m3']:.2f} m3 back-charged @ HK${qs_summary['contra_unit_rate_hkd']:,.0f}/m3", '"HK$"#,##0.00'),
+        ("Net Main Contractor Unrecovered Overbreak Exposure", qs_summary['net_mc_wastage_hkd'], f"{qs_summary['mc_absorbed_m3']:.2f} m3 Within Cap", "Residual overbreak absorbed by Main Contractor", '"HK$"#,##0.00'),
+        ("Net Contractor Actual Cost (After Contra-Charge)", qs_summary['total_ac_hkd'], f"Net CPI = {qs_summary['cpi']:.2f}", f"Improved from Gross CPI = {qs_summary['cpi_gross']:.2f}", '"HK$"#,##0.00'),
+        ("Net Subcontractor Certified Payable Amount", qs_summary['sub_net_payable_hkd'], "After Deductions", "Gross Subcontract Work minus Concrete & Damage Back-Charges", '"HK$"#,##0.00'),
     ]
     for r_idx, (m_name, m_val, m_stat, m_note, num_fmt) in enumerate(kpi_rows, 14):
         c1 = ws1.cell(r_idx, 1, m_name); c2 = ws1.cell(r_idx, 2, m_val)
         c3 = ws1.cell(r_idx, 3, m_stat); c4 = ws1.cell(r_idx, 4, m_note)
         for c in (c1, c2, c3, c4):
-            c.font = font_bold if "Gross Certified" in m_name or "Wastage" in m_name else font_reg
+            c.font = font_bold if "Gross Certified" in m_name or "Contra-Charge" in m_name or "Net" in m_name else font_reg
             c.border = grid_border
         c2.number_format = num_fmt
-        if "Gross Certified" in m_name or "Claimable BOQ" in m_name: c2.fill = accent_green
-        elif "Wastage" in m_name or "Damage" in m_name: c2.fill = accent_red
+        if "Gross Certified" in m_name or "Recovered" in m_name: c2.fill = accent_green
+        elif "Wastage" in m_name or "Exposure" in m_name: c2.fill = accent_red
 
-    ws2 = wb.create_sheet(title="Active Columns QS Schedule")
+    # --- TAB 2: CLIENT IPA SCHEDULE ---
+    ws2 = wb.create_sheet(title="Client BOQ IPA Schedule")
     ws2.views.sheetView[0].showGridLines = True
-    if work_df.empty:
-        active_df = pd.DataFrame(columns=['Concrete Column ID', 'Construction_Stage'])
-    else:
-        active_df = work_df.reset_index(drop=True)
-    ws2["A1"] = f"SCHEDULE OF CONCRETE COLUMNS ({period_label}) - BOQ RE-MEASUREMENT & VARIANCE BREAKDOWN"
+    active_df = work_df.reset_index(drop=True) if not work_df.empty else pd.DataFrame(columns=['Concrete Column ID', 'Construction_Stage'])
+    ws2["A1"] = f"CLIENT INTERIM PAYMENT SCHEDULE ({period_label}) - HKSMM4 RE-MEASUREMENT"
     ws2["A1"].font = font_title
     
     cols_tab2 = [
@@ -480,20 +549,12 @@ def generate_ipa_workbook(work_df, qs_summary, rates, period_label="All Active /
         ("As-Built Cyl Vol (m3)", "AsBuilt_Cylinder_Vol_m3", "0.000"),
         ("Actual Poured (m3)", "Actual Concrete Volumn (m3)", "0.000"),
         ("Claimable Var Vol (m3)", "Claimable_BOQ_Var_Vol_m3", "+0.000;-0.000;0.000"),
-        ("True Overbreak Vol (m3)", "True_Radial_Overbreak_Vol_m3", "0.000"),
-        ("True Overbreak (%)", "True_Overbreak_Pct", "0.0"),
-        ("Rig Hours (hr)", "Rig_Hours", "0.0"),
-        ("Rig Cost/m (HKD/m)", "Rig_Cost_per_m_HKD", '"HK$"#,##0.00'),
-        ("Repair Cost (HKD)", "Repair_Cost_HKD", '"HK$"#,##0.00'),
         ("Baseline Budget (HKD)", "Baseline_Budget_HKD", '"HK$"#,##0.00'),
         ("Certified IPA Value (HKD)", "Claimable_BOQ_Value_HKD", '"HK$"#,##0.00'),
-        ("True Wastage Cost (HKD)", "True_Wastage_Cost_HKD", '"HK$"#,##0.00'),
-        ("Actual Total Cost (HKD)", "Actual_Cost_HKD", '"HK$"#,##0.00'),
     ]
     for c_idx, (hdr_text, _, _) in enumerate(cols_tab2, 1):
         cell = ws2.cell(3, c_idx, hdr_text)
-        cell.font = font_hdr; cell.fill = navy_header
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.font = font_hdr; cell.fill = navy_header; cell.alignment = Alignment(horizontal="center", wrap_text=True)
     for r_idx, row in active_df.iterrows():
         excel_r = r_idx + 4
         for c_idx, (_, col_key, num_fmt) in enumerate(cols_tab2, 1):
@@ -504,26 +565,61 @@ def generate_ipa_workbook(work_df, qs_summary, rates, period_label="All Active /
             if r_idx % 2 == 1: cell.fill = zebra_fill
             if num_fmt != "@": cell.number_format = num_fmt
             if col_key == "Claimable_BOQ_Value_HKD": cell.fill = accent_green
-            elif col_key == "True_Wastage_Cost_HKD" and float(val or 0) > 0: cell.fill = accent_red
-            
-    tot_r = max(5, len(active_df) + 4)
-    ws2.cell(tot_r, 1, "TOTAL / AVERAGE").font = font_bold
-    ws2.cell(tot_r, 1).border = total_border; ws2.cell(tot_r, 1).fill = slate_sub
-    ws2.cell(tot_r, 2, f"{len(active_df)} Columns").font = font_bold
-    ws2.cell(tot_r, 2).border = total_border; ws2.cell(tot_r, 2).fill = slate_sub
+    tot_r2 = max(5, len(active_df) + 4)
+    ws2.cell(tot_r2, 1, "TOTAL").font = font_bold; ws2.cell(tot_r2, 1).border = total_border; ws2.cell(tot_r2, 1).fill = slate_sub
+    ws2.cell(tot_r2, 2, f"{len(active_df)} Cols").font = font_bold; ws2.cell(tot_r2, 2).border = total_border; ws2.cell(tot_r2, 2).fill = slate_sub
     for c_idx in range(3, len(cols_tab2) + 1):
         col_let = get_column_letter(c_idx)
-        _, col_key, num_fmt = cols_tab2[c_idx - 1]
-        c = ws2.cell(tot_r, c_idx)
-        if col_key in ["True_Overbreak_Pct", "Rig_Cost_per_m_HKD"]:
-            c.value = f"=AVERAGE({col_let}4:{col_let}{tot_r-1})"
-        else:
-            c.value = f"=SUM({col_let}4:{col_let}{tot_r-1})"
-        c.font = font_bold; c.border = total_border; c.fill = slate_sub
-        c.number_format = num_fmt
-        
-    for ws in [ws1, ws2]:
-        ws.freeze_panes = "A4" if ws == ws2 else "A6"
+        c = ws2.cell(tot_r2, c_idx, f"=SUM({col_let}4:{col_let}{tot_r2-1})")
+        c.font = font_bold; c.border = total_border; c.fill = slate_sub; c.number_format = cols_tab2[c_idx - 1][2]
+
+    # --- TAB 3: SUBCONTRACTOR CONTRA-CHARGE & PAYMENT LEDGER ---
+    ws3 = wb.create_sheet(title="Subcontractor Contra-Charge")
+    ws3.views.sheetView[0].showGridLines = True
+    ws3["A1"] = f"SUBCONTRACTOR PAYMENT & FREE-ISSUE CONCRETE CONTRA-CHARGE LEDGER ({rates.get('cap_pct', 15.0):.0f}% CAP)"
+    ws3["A1"].font = font_title
+    
+    cols_tab3 = [
+        ("Col ID", "Concrete Column ID", "@"),
+        ("Stage", "Construction_Stage", "@"),
+        ("As-Built Cyl Vol (m3)", "AsBuilt_Cylinder_Vol_m3", "0.000"),
+        ("Actual Poured (m3)", "Actual Concrete Volumn (m3)", "0.000"),
+        ("True Overbreak (m3)", "True_Radial_Overbreak_Vol_m3", "0.000"),
+        ("Allowed Cap Vol (m3)", "Allowed_Wastage_Cap_Vol_m3", "0.000"),
+        ("MC Absorbed Vol (m3)", "MC_Absorbed_Overbreak_Vol_m3", "0.000"),
+        ("Sub Back-Charge Vol (m3)", "Sub_Backcharge_Vol_m3", "0.000"),
+        ("Gross Wastage Cost (HKD)", "True_Wastage_Cost_HKD", '"HK$"#,##0.00'),
+        ("Contra-Charge Base (HKD)", "Sub_Contra_Base_HKD", '"HK$"#,##0.00'),
+        ("Admin Fee (HKD)", "Sub_Contra_Admin_Fee_HKD", '"HK$"#,##0.00'),
+        ("Total Contra-Charge (HKD)", "Sub_Total_Contra_Charge_HKD", '"HK$"#,##0.00'),
+        ("Damage Deduction (HKD)", "Repair_Cost_HKD", '"HK$"#,##0.00'),
+        ("Sub Gross Work (HKD)", "Sub_Gross_Valuation_HKD", '"HK$"#,##0.00'),
+        ("Sub Net Payable (HKD)", "Sub_Net_Payable_HKD", '"HK$"#,##0.00'),
+    ]
+    for c_idx, (hdr_text, _, _) in enumerate(cols_tab3, 1):
+        cell = ws3.cell(3, c_idx, hdr_text)
+        cell.font = font_hdr; cell.fill = navy_header; cell.alignment = Alignment(horizontal="center", wrap_text=True)
+    for r_idx, row in active_df.iterrows():
+        excel_r = r_idx + 4
+        for c_idx, (_, col_key, num_fmt) in enumerate(cols_tab3, 1):
+            val = row.get(col_key, "")
+            if pd.isna(val): val = 0.0 if num_fmt != "@" else ""
+            cell = ws3.cell(excel_r, c_idx, val)
+            cell.font = font_reg; cell.border = grid_border
+            if r_idx % 2 == 1: cell.fill = zebra_fill
+            if num_fmt != "@": cell.number_format = num_fmt
+            if col_key == "Sub_Total_Contra_Charge_HKD" and float(val or 0) > 0: cell.fill = accent_red
+            elif col_key == "Sub_Net_Payable_HKD": cell.fill = accent_green
+    tot_r3 = max(5, len(active_df) + 4)
+    ws3.cell(tot_r3, 1, "TOTAL").font = font_bold; ws3.cell(tot_r3, 1).border = total_border; ws3.cell(tot_r3, 1).fill = slate_sub
+    ws3.cell(tot_r3, 2, f"{len(active_df)} Cols").font = font_bold; ws3.cell(tot_r3, 2).border = total_border; ws3.cell(tot_r3, 2).fill = slate_sub
+    for c_idx in range(3, len(cols_tab3) + 1):
+        col_let = get_column_letter(c_idx)
+        c = ws3.cell(tot_r3, c_idx, f"=SUM({col_let}4:{col_let}{tot_r3-1})")
+        c.font = font_bold; c.border = total_border; c.fill = slate_sub; c.number_format = cols_tab3[c_idx - 1][2]
+
+    for ws in [ws1, ws2, ws3]:
+        ws.freeze_panes = "A4" if ws != ws1 else "A6"
         for col in ws.columns:
             max_l = max(len(str(cell.value or '')) for cell in col)
             ws.column_dimensions[get_column_letter(col[0].column)].width = max(min(max_l + 4, 38), 13)
@@ -534,7 +630,10 @@ def generate_ipa_workbook(work_df, qs_summary, rates, period_label="All Active /
 
 # --- RUN APPLICATION ---
 df = load_data()
-df, qs_summary = compute_commercial_metrics(df, concrete_unit_cost, soil_drill_rate, cdg_drill_rate, rig_hourly_rate)
+df, qs_summary = compute_commercial_metrics(
+    df, concrete_unit_cost, soil_drill_rate, cdg_drill_rate, rig_hourly_rate,
+    cap_pct=wastage_cap_pct, admin_pct=admin_markup_pct, sub_share_pct=sub_rate_share_pct
+)
 
 filtered_df = df.copy()
 if selected_stage != "All":
@@ -550,7 +649,7 @@ else:
     progress_pct = (completed_cols / total_cols) * 100 if total_cols > 0 else 0
     
     st.markdown("### 📈 Executive Engineering, Schedule & Commercial Control Panel")
-    top_col1, top_col2, top_col3, top_col4 = st.columns([1, 1.15, 1.35, 1.2])
+    top_col1, top_col2, top_col3, top_col4 = st.columns([0.95, 1.15, 1.45, 1.15])
     
     with top_col1:
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
@@ -568,16 +667,17 @@ else:
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
         st.markdown("**📊 Earned Value (EVM) & Rig KPIs**")
         st.metric("Gross Certified IPA (Billable)", f"HK${qs_summary['total_claimable_ipa_hkd']:,.0f}")
-        st.metric("CPI / SPI Performance", f"CPI: {qs_summary['cpi']:.2f} | SPI: {qs_summary['spi']:.2f}", f"CV: HK${qs_summary['total_ev_hkd'] - qs_summary['total_ac_hkd']:,.0f}")
+        st.metric("Net CPI (After Contra-Charge)", f"{qs_summary['cpi']:.2f} (Gross: {qs_summary['cpi_gross']:.2f})", f"SPI: {qs_summary['spi']:.2f}")
         st.caption(f"Speed: {qs_summary['avg_drill_speed_m_hr']:.2f} m/h | Rig Cost: HK${qs_summary['avg_rig_cost_per_m']:,.0f}/m | NC Shifts: {qs_summary['total_nc_shifts']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with top_col3:
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-        st.markdown("**💸 QS Variance Split (HKSMM4)**")
-        st.markdown(f"<div class='claim-good'>✅ Claimable BOQ Variation: +HK${qs_summary['claimable_var_hkd']:,.0f} ({qs_summary['claimable_conc_var_m3']:+.2f} m³)</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='cost-alert'>🚨 True Overbreak Wastage: -HK${qs_summary['true_wastage_hkd']:,.0f} ({qs_summary['true_overbreak_m3']:.2f} m³)</div>", unsafe_allow_html=True)
-        st.caption(f"Casing Repairs: HK${qs_summary['total_repair_hkd']:,.0f} ({qs_summary['damaged_casings_count']} broken) | Concrete @ HK${concrete_unit_cost:,.0f}/m³")
+        st.markdown(f"**⚖️ QS Variance & Subcontract Contra-Charge ({wastage_cap_pct:.0f}% Cap)**")
+        st.markdown(f"<div class='claim-good'>✅ Client BOQ Variation: +HK${qs_summary['claimable_var_hkd']:,.0f} ({qs_summary['claimable_conc_var_m3']:+.2f} m³)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='contra-recover'>🛡️ Sub Contra-Charge Recovered: +HK${qs_summary['sub_contra_total_hkd']:,.0f} ({qs_summary['sub_backcharge_m3']:.2f} m³ @ HK${qs_summary['contra_unit_rate_hkd']:,.0f}/m³)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='cost-alert'>🚨 Net MC Unrecovered Wastage: -HK${qs_summary['net_mc_wastage_hkd']:,.0f} (down from HK${qs_summary['true_wastage_hkd']:,.0f})</div>", unsafe_allow_html=True)
+        st.caption(f"Wastage Recovery Ratio: {qs_summary['wastage_recovery_pct']:.1f}% | Sub Net Payable: HK${qs_summary['sub_net_payable_hkd']:,.0f}")
         st.markdown("</div>", unsafe_allow_html=True)
         
     with top_col4:
@@ -606,13 +706,14 @@ else:
     col_vis, col_data = st.columns([2.4, 1.6])
     
     with col_vis:
-        st.markdown("### 🗺️ Spatial Digital Twin, EVM S-Curve & Plant Productivity")
+        st.markdown("### 🗺️ Spatial Digital Twin, EVM S-Curve & Subcontractor Back-Charge")
         color_map = {"Not Started": "lightgrey", "In Progress": "#f1c40f", "Drilled": "#3498db", "Completed": "#2ecc71"}
-        tab1, tab2, tab3, tab4 = st.tabs([
-            "2D Grid Plan View",
-            "3D Column Foundation Model",
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "2D Grid Plan",
+            "3D Foundation Model",
             "📈 Time-Phased EVM S-Curve",
-            "💰 Column QS & Rig Cost/m"
+            "💰 Column QS & Rig Cost/m",
+            "⚖️ Subcontractor Back-Charge"
         ])
         
         with tab1:
@@ -620,7 +721,7 @@ else:
                 fig2d = px.scatter(
                     filtered_df, x='X_Coord', y='Y_Coord', color='Construction_Stage',
                     color_discrete_map=color_map, hover_name='Concrete Column ID',
-                    hover_data=['Foundation level\n(mPD)', 'Actual Founding level', 'Claimable_BOQ_Value_HKD', 'True_Wastage_Cost_HKD']
+                    hover_data=['Foundation level\n(mPD)', 'Actual Founding level', 'Claimable_BOQ_Value_HKD', 'Sub_Total_Contra_Charge_HKD']
                 )
                 fig2d.update_traces(marker=dict(size=15, line=dict(width=1, color='DarkSlateGrey')))
                 fig2d.update_yaxes(scaleanchor="x", scaleratio=1)
@@ -651,28 +752,29 @@ else:
                 st.info("No data available.")
                 
         with tab3:
-            # --- 2D: TRUE TIME-PHASED EARNED VALUE MANAGEMENT (EVM) S-CURVE ---
             c_dates_all = pd.to_datetime(df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce')
             dr_dates_all = pd.to_datetime(df['Drill Completed Date\n(DD/MM/YYYY)'], errors='coerce')
             min_dt = pd.to_datetime("2026-07-20")
             max_dt = max(c_dates_all.dropna().max() if c_dates_all.notna().any() else pd.to_datetime("2026-08-30"), pd.to_datetime("2026-08-30"))
             timeline = pd.date_range(min_dt, max_dt, freq='D')
             pv_series = np.linspace(0, qs_summary['total_pv_hkd'], len(timeline))
-            ev_series, ac_series, ipa_series = [], [], []
+            ev_series, ac_gross_s, ac_net_s, ipa_series = [], [], [], []
             for d_pt in timeline:
                 c_m = (df['Construction_Stage'] == 'Completed') & (c_dates_all <= d_pt)
                 dr_m = (df['Construction_Stage'].isin(['Drilled', 'Completed'])) & (dr_dates_all <= d_pt) & (~c_m)
                 ev_series.append(df.loc[c_m, 'Baseline_Budget_HKD'].sum() + df.loc[dr_m, 'Baseline_Budget_HKD'].sum() * 0.60)
-                ac_series.append(df.loc[c_m | dr_m, 'Actual_Cost_HKD'].sum())
+                ac_gross_s.append(df.loc[c_m | dr_m, 'Actual_Cost_Gross_HKD'].sum())
+                ac_net_s.append(df.loc[c_m | dr_m, 'Actual_Cost_HKD'].sum())
                 ipa_series.append(df.loc[c_m, 'Claimable_BOQ_Value_HKD'].sum() + df.loc[dr_m, 'Claimable_BOQ_Value_HKD'].sum() * 0.60)
             
             fig_scurve = go.Figure()
             fig_scurve.add_trace(go.Scatter(x=timeline, y=pv_series, mode='lines', name='Planned Value (PV)', line=dict(color='#7f8c8d', dash='dash', width=2.5)))
             fig_scurve.add_trace(go.Scatter(x=timeline, y=ev_series, mode='lines+markers', name='Earned Value (EV)', line=dict(color='#2980b9', width=3)))
             fig_scurve.add_trace(go.Scatter(x=timeline, y=ipa_series, mode='lines+markers', name='Certified BOQ IPA (Billable)', line=dict(color='#27ae60', width=3)))
-            fig_scurve.add_trace(go.Scatter(x=timeline, y=ac_series, mode='lines+markers', name='Actual Contractor Cost (AC)', line=dict(color='#c0392b', width=3)))
+            fig_scurve.add_trace(go.Scatter(x=timeline, y=ac_gross_s, mode='lines', name='Gross Contractor Cost (Before Back-Charge)', line=dict(color='#e67e22', dash='dot', width=2)))
+            fig_scurve.add_trace(go.Scatter(x=timeline, y=ac_net_s, mode='lines+markers', name='Net Contractor Cost (After Back-Charge)', line=dict(color='#c0392b', width=3)))
             fig_scurve.update_layout(
-                title="Cumulative Earned Value Management (EVM) S-Curve (PV vs. EV vs. Billable IPA vs. AC)",
+                title="Cumulative Earned Value Management (EVM) S-Curve (with Subcontractor Contra-Charge Recovery)",
                 xaxis_title="Project Timeline", yaxis_title="Cumulative Value / Cost (HKD $)",
                 height=560, plot_bgcolor='white', hovermode='x unified'
             )
@@ -684,10 +786,10 @@ else:
                 fig_qs = go.Figure()
                 fig_qs.add_trace(go.Bar(name='Baseline Budget (EV)', x=active_viz['Concrete Column ID'], y=active_viz['Baseline_Budget_HKD'], marker_color='#2980b9'))
                 fig_qs.add_trace(go.Bar(name='Certified IPA Value (Billable)', x=active_viz['Concrete Column ID'], y=active_viz['Claimable_BOQ_Value_HKD'], marker_color='#27ae60'))
-                fig_qs.add_trace(go.Bar(name='Actual Contractor Cost (AC)', x=active_viz['Concrete Column ID'], y=active_viz['Actual_Cost_HKD'], marker_color='#c0392b'))
+                fig_qs.add_trace(go.Bar(name='Net Contractor Cost (AC)', x=active_viz['Concrete Column ID'], y=active_viz['Actual_Cost_HKD'], marker_color='#c0392b'))
                 fig_qs.update_layout(
-                    barmode='group', title="Column-by-Column Valuation: Baseline vs. Certified IPA vs. Actual Cost (HKD)",
-                    yaxis_title="HKD ($)", height=320, plot_bgcolor='white'
+                    barmode='group', title="Column-by-Column Valuation: Baseline vs. Certified IPA vs. Net Actual Cost (HKD)",
+                    yaxis_title="HKD ($)", height=310, plot_bgcolor='white'
                 )
                 st.plotly_chart(fig_qs, use_container_width=True)
                 
@@ -698,10 +800,56 @@ else:
                     hover_data=['Rig_Hours', 'NC_Shifts', 'No_of_Casings', 'Drilling_Speed_m_hr', 'Remark'],
                     title="Rig Operating Cost per Drilled Meter (HK$/m) & Casing Damage Highlight"
                 )
-                fig_rig.update_layout(height=300, plot_bgcolor='white', yaxis_title="Rig Cost / m (HKD)")
+                fig_rig.update_layout(height=290, plot_bgcolor='white', yaxis_title="Rig Cost / m (HKD)")
                 st.plotly_chart(fig_rig, use_container_width=True)
             else:
                 st.info("Complete columns to view commercial breakdown.")
+
+        with tab5:
+            # --- NEW TAB 5: SUBCONTRACTOR BACK-CHARGE & PAIN-SHARE ANALYTICS ---
+            comp_viz = df[df['Construction_Stage'] == 'Completed'].copy()
+            if not comp_viz.empty:
+                fig_cap = go.Figure()
+                fig_cap.add_trace(go.Bar(
+                    name='As-Built Cylinder Vol (Claimable)',
+                    x=comp_viz['Concrete Column ID'], y=comp_viz['AsBuilt_Cylinder_Vol_m3'], marker_color='#2980b9'
+                ))
+                fig_cap.add_trace(go.Bar(
+                    name=f'Allowed Free-Issue Cap ({wastage_cap_pct:.0f}% MC Absorbed)',
+                    x=comp_viz['Concrete Column ID'], y=comp_viz['MC_Absorbed_Overbreak_Vol_m3'], marker_color='#f39c12'
+                ))
+                fig_cap.add_trace(go.Bar(
+                    name=f'Excess Overbreak >{wastage_cap_pct:.0f}% (Sub Back-Charged)',
+                    x=comp_viz['Concrete Column ID'], y=comp_viz['Sub_Backcharge_Vol_m3'], marker_color='#c0392b'
+                ))
+                fig_cap.update_layout(
+                    barmode='stack',
+                    title=f"Free-Issue Concrete Volume Split: As-Built Cylinder + {wastage_cap_pct:.0f}% Allowed Cap vs. Subcontractor Back-Charge (m³)",
+                    yaxis_title="Concrete Volume (m³)", height=310, plot_bgcolor='white'
+                )
+                st.plotly_chart(fig_cap, use_container_width=True)
+
+                fig_rec = go.Figure()
+                fig_rec.add_trace(go.Bar(
+                    name='Gross Overbreak Loss (@ Concrete Rate)',
+                    x=comp_viz['Concrete Column ID'], y=comp_viz['True_Wastage_Cost_HKD'], marker_color='#7f8c8d'
+                ))
+                fig_rec.add_trace(go.Bar(
+                    name=f'Sub Contra-Charge Recovered (@ HK${qs_summary["contra_unit_rate_hkd"]:,.0f}/m³)',
+                    x=comp_viz['Concrete Column ID'], y=comp_viz['Sub_Total_Contra_Charge_HKD'], marker_color='#27ae60'
+                ))
+                fig_rec.add_trace(go.Bar(
+                    name='Net MC Unrecovered Wastage Exposure',
+                    x=comp_viz['Concrete Column ID'], y=comp_viz['Net_MC_Unrecovered_Wastage_HKD'], marker_color='#e74c3c'
+                ))
+                fig_rec.update_layout(
+                    barmode='group',
+                    title="Financial Pain-Share: Gross Overbreak Loss vs. Subcontractor Contra-Charge Recovery vs. Net MC Exposure (HKD)",
+                    yaxis_title="HKD ($)", height=310, plot_bgcolor='white'
+                )
+                st.plotly_chart(fig_rec, use_container_width=True)
+            else:
+                st.info("No completed columns available for Subcontractor Back-Charge analysis.")
 
     with col_data:
         st.markdown("### 📝 Record As-Built & Plant Data")
@@ -782,15 +930,15 @@ else:
                         save_path = "FYP_Concrete_Column_Data_v2.csv" if os.path.exists("FYP_Concrete_Column_Data_v2.csv") else "FYP_Concrete_Column_Data.csv"
                         df.to_csv(save_path, index=False)
                         st.cache_data.clear()
-                        st.success(f"Column {selected_col} updated! QS & Audit logs refreshed.")
+                        st.success(f"Column {selected_col} updated! QS & Subcontractor Contra-Charge logs refreshed.")
                         st.rerun()
 
-            # --- SELF-CONTAINED EXPORT DOCUMENTATION (ALL 4 EXPORTS ALWAYS WORK) ---
+            # --- SELF-CONTAINED EXPORT DOCUMENTATION ---
             st.markdown("### 📄 Commercial & Engineering Exports")
             if st.session_state['role'] == 'Admin':
-                ex1, ex2, ex3, ex4 = st.tabs(["💰 Monthly IPA (.xlsx)", "📄 HKBD PDF", "📥 Single Excel", "📦 Batch ZIP"])
+                ex1, ex2, ex3, ex4 = st.tabs(["💰 IPA & Contra-Charge (.xlsx)", "📄 HKBD PDF", "📥 Single Excel", "📦 Batch ZIP"])
                 with ex1:
-                    filter_ipa_by_date = st.checkbox("Filter IPA Schedule by Selected Date Range above", value=False)
+                    filter_ipa_by_date = st.checkbox("Filter IPA & Contra-Charge by Selected Date Range above", value=False)
                     if filter_ipa_by_date and len(date_range) == 2:
                         s_d, e_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
                         c_dt = pd.to_datetime(df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce')
@@ -804,12 +952,16 @@ else:
                         
                     ipa_bytes = generate_ipa_workbook(
                         ipa_sub_df, qs_summary,
-                        {'soil': soil_drill_rate, 'cdg': cdg_drill_rate, 'concrete': concrete_unit_cost, 'rig': rig_hourly_rate},
+                        {
+                            'soil': soil_drill_rate, 'cdg': cdg_drill_rate,
+                            'concrete': concrete_unit_cost, 'rig': rig_hourly_rate,
+                            'cap_pct': wastage_cap_pct, 'admin_pct': admin_markup_pct
+                        },
                         period_label=p_label
                     )
-                    st.download_button("📊 Download Interim Payment Application (.xlsx)", ipa_bytes, f"IPA_Valuation_{datetime.date.today()}.xlsx")
+                    st.download_button("📊 Download 3-Tab IPA & Contra-Charge (.xlsx)", ipa_bytes, f"IPA_and_ContraCharge_{datetime.date.today()}.xlsx")
                 with ex2:
-                    pdf_b, pdf_n = generate_pdf_report(df[df['Concrete Column ID'] == selected_col].iloc[0])
+                    pdf_b, pdf_n = generate_pdf_report(df[df['Concrete Column ID'] == selected_col].iloc[0], cap_pct=wastage_cap_pct, admin_pct=admin_markup_pct)
                     st.download_button("📥 Download Formal HKBD & QS PDF", pdf_b, pdf_n, mime="application/pdf")
                 with ex3:
                     ex_b, ex_n = generate_excel_report(df[df['Concrete Column ID'] == selected_col].iloc[0])
@@ -828,21 +980,20 @@ else:
                                 for _, r_row in comp_rows.iterrows():
                                     fb, fn = generate_excel_report(r_row)
                                     if fb: zf.writestr(fn, fb)
-                                    pb, pn = generate_pdf_report(r_row)
+                                    pb, pn = generate_pdf_report(r_row, cap_pct=wastage_cap_pct, admin_pct=admin_markup_pct)
                                     if pb: zf.writestr(pn, pb)
                             st.download_button("📦 Download ZIP Archive (Excel + PDF)", zip_buf.getvalue(), f"Batch_Export_{datetime.date.today()}.zip", mime="application/zip")
             else:
-                st.info("Commercial IPA, PDF & Batch exports require Admin privileges (`admin123`).")
+                st.info("Commercial IPA, Contra-Charge & Official PDF exports require Admin privileges (`admin123`).")
 
     # --- ADVANCED DATA VIEW ---
     st.markdown("---")
-    with st.expander("📂 View Complete Database (Engineering, QS Valuation, Plant & Audit Trail)"):
+    with st.expander("📂 View Complete Database (Engineering, QS Valuation, Subcontractor Back-Charge & Audit Trail)"):
         cols_show = [c for c in [
-            'Concrete Column ID', 'Construction_Stage', 'Ground Level', 'Actual Founding level',
-            'Estimate Concrete volume\n(m3)', 'AsBuilt_Cylinder_Vol_m3', 'Actual Concrete Volumn (m3)',
-            'Claimable_BOQ_Var_Vol_m3', 'True_Radial_Overbreak_Vol_m3', 'Claimable_BOQ_Value_HKD',
-            'True_Wastage_Cost_HKD', 'Rig_Hours', 'NC_Shifts', 'No_of_Casings', 'Drilling_Speed_m_hr',
-            'Rig_Cost_per_m_HKD', 'Equipment_Damage', 'Repair_Cost_HKD', 'Remark',
-            'Last_Edited_By', 'Timestamp_of_Edit'
+            'Concrete Column ID', 'Construction_Stage', 'AsBuilt_Cylinder_Vol_m3', 'Actual Concrete Volumn (m3)',
+            'True_Radial_Overbreak_Vol_m3', 'Allowed_Wastage_Cap_Vol_m3', 'MC_Absorbed_Overbreak_Vol_m3',
+            'Sub_Backcharge_Vol_m3', 'True_Wastage_Cost_HKD', 'Sub_Total_Contra_Charge_HKD',
+            'Net_MC_Unrecovered_Wastage_HKD', 'Sub_Gross_Valuation_HKD', 'Sub_Net_Payable_HKD',
+            'Rig_Hours', 'NC_Shifts', 'Equipment_Damage', 'Repair_Cost_HKD', 'Last_Edited_By', 'Timestamp_of_Edit'
         ] if c in filtered_df.columns]
         st.dataframe(filtered_df[cols_show], use_container_width=True, height=340)
