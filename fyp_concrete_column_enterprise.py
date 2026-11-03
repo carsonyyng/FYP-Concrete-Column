@@ -91,7 +91,7 @@ with st.expander("📋 View Method Statement & General Procedure"):
 
 st.markdown("---")
 
-# --- DATA LOADING & SANITIZATION ---
+# --- DATA LOADING & SANITIZATION (WITH STRICT PYTHON 3.14 / PANDAS DTYPE PROTECTION) ---
 @st.cache_data(show_spinner=False)
 def load_data():
     if os.path.exists("FYP_Concrete_Column_Data_v2.csv"):
@@ -105,39 +105,52 @@ def load_data():
     df = df.dropna(subset=['Concrete Column ID']).copy()
     df = df[df['Concrete Column ID'].astype(str).str.strip() != ''].reset_index(drop=True)
     
-    required_cols = [
+    # 2. Explicitly enforce 'object' dtype for all text/date columns and 'float64' for numeric columns
+    # This prevents Pandas LossySetitemError / TypeError on Python 3.14 when empty CSV columns default to float64
+    text_cols = [
+        'Concrete Column ID', 'Construction_Stage',
+        'Drill Start Date \n(DD/MM/YYYY)', 'Drill Completed Date\n(DD/MM/YYYY)', 'Concrete Date\n(DD/MM/YYYY)',
+        'column drilled', 'Completed', 'Equipment_Damage', 'Remark', 'Last_Edited_By', 'Timestamp_of_Edit'
+    ]
+    num_cols = [
         'Cut off level (mPD)', 'Tentative Concrete Column Bottom level \n(mPD)',
         'Actual Founding level', 'Foundation level\n(mPD)', 
         'Actual Concrete Volumn (m3)', 'X_Coord', 'Y_Coord',
-        'Drill Start Date \n(DD/MM/YYYY)', 'Drill Completed Date\n(DD/MM/YYYY)', 
-        'Concrete Date\n(DD/MM/YYYY)', 'Casing Top Level\n(mPD)', 
-        'Measuring Depth\n(m)', 'Ground Level', 'Actual Toe Level\n(mPD)',
+        'Casing Top Level\n(mPD)', 'Measuring Depth\n(m)', 'Ground Level', 'Actual Toe Level\n(mPD)',
         'Alluvium Bottom\n(mPD)', 'Embedded Depth in CD Material \n(m)',
         'Concrete Column Length \n(m)', 'Estimate Concrete volume\n(m3)', 
         'As-built casing Length (m)', 'Concrete Top Level (mPD)',
-        'Rig_Hours', 'NC_Shifts', 'No_of_Casings', 'Equipment_Damage', 'Repair_Cost_HKD',
-        'Remark', 'Last_Edited_By', 'Timestamp_of_Edit'
+        'Rig_Hours', 'NC_Shifts', 'No_of_Casings', 'Repair_Cost_HKD'
     ]
-    for col in required_cols:
+    
+    for col in text_cols:
         if col not in df.columns:
-            df[col] = np.nan
+            df[col] = pd.Series([None] * len(df), dtype="object")
+        else:
+            df[col] = df[col].astype("object")
             
-    # 2. Restore Missing Design Length & Theoretical Volume Formula (+3.0m top allowance)
+    for col in num_cols:
+        if col not in df.columns:
+            df[col] = pd.Series([np.nan] * len(df), dtype="float64")
+        else:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype("float64")
+            
+    # 3. Restore Missing Design Length & Theoretical Volume Formula (+3.0m top allowance)
     len_col = 'Concrete Column Length \n(m)'
     est_col = 'Estimate Concrete volume\n(m3)'
     if df[len_col].isna().any():
         m_len = df[len_col].isna()
         df.loc[m_len, len_col] = (
-            pd.to_numeric(df.loc[m_len, 'Cut off level (mPD)'], errors='coerce') -
-            pd.to_numeric(df.loc[m_len, 'Tentative Concrete Column Bottom level \n(mPD)'], errors='coerce')
+            df.loc[m_len, 'Cut off level (mPD)'] -
+            df.loc[m_len, 'Tentative Concrete Column Bottom level \n(mPD)']
         )
     if df[est_col].isna().all():
-        df[est_col] = np.round(CROSS_AREA * (pd.to_numeric(df[len_col], errors='coerce') + 3.0), 4)
+        df[est_col] = np.round(CROSS_AREA * (df[len_col] + 3.0), 4)
     else:
         m_est = df[est_col].isna()
-        df.loc[m_est, est_col] = np.round(CROSS_AREA * (pd.to_numeric(df.loc[m_est, len_col], errors='coerce') + 3.0), 4)
+        df.loc[m_est, est_col] = np.round(CROSS_AREA * (df.loc[m_est, len_col] + 3.0), 4)
 
-    # 3. Auto-seed the 13 real site records from Standardized sheet if CSV is still unpopulated
+    # 4. Auto-seed the 13 real site records from Standardized sheet if CSV is still unpopulated
     if (df['Construction_Stage'].fillna('Not Started') == 'Not Started').all():
         seed_records = [
             ("BH12_1_C11", "Completed", "2026-08-05", "2026-08-06", "2026-08-13", -54.430, 4.270, 59.52, 59.41, 3.61, 3.61, 25.0, 39.5, 1, 3.0, "No", 0.0, "", "Engineer", "2026-08-19 16:28:11"),
@@ -158,28 +171,28 @@ def load_data():
             idx_m = df['Concrete Column ID'] == cid
             if idx_m.any():
                 i = df[idx_m].index[0]
-                df.loc[i, 'Construction_Stage'] = stg
-                df.loc[i, 'Drill Start Date \n(DD/MM/YYYY)'] = ds
-                if de: df.loc[i, 'Drill Completed Date\n(DD/MM/YYYY)'] = de
-                if cd: df.loc[i, 'Concrete Date\n(DD/MM/YYYY)'] = cd
-                df.loc[i, 'Actual Founding level'] = af
-                df.loc[i, 'Casing Top Level\n(mPD)'] = ct
-                df.loc[i, 'Measuring Depth\n(m)'] = md
-                df.loc[i, 'As-built casing Length (m)'] = cl
-                df.loc[i, 'Actual Toe Level\n(mPD)'] = round(ct - cl, 3)
-                df.loc[i, 'Ground Level'] = gl
-                df.loc[i, 'Concrete Top Level (mPD)'] = ctop
-                df.loc[i, 'Actual Concrete Volumn (m3)'] = avol
-                df.loc[i, 'Rig_Hours'] = rhrs
-                df.loc[i, 'NC_Shifts'] = ncs
-                df.loc[i, 'No_of_Casings'] = cas
-                df.loc[i, 'Equipment_Damage'] = dmg
-                df.loc[i, 'Repair_Cost_HKD'] = rcost
-                df.loc[i, 'Remark'] = rem
-                df.loc[i, 'Last_Edited_By'] = ed
-                df.loc[i, 'Timestamp_of_Edit'] = ts
+                df.loc[i, 'Construction_Stage'] = str(stg)
+                df.loc[i, 'Drill Start Date \n(DD/MM/YYYY)'] = str(ds)
+                if de: df.loc[i, 'Drill Completed Date\n(DD/MM/YYYY)'] = str(de)
+                if cd: df.loc[i, 'Concrete Date\n(DD/MM/YYYY)'] = str(cd)
+                df.loc[i, 'Actual Founding level'] = float(af)
+                df.loc[i, 'Casing Top Level\n(mPD)'] = float(ct)
+                df.loc[i, 'Measuring Depth\n(m)'] = float(md)
+                df.loc[i, 'As-built casing Length (m)'] = float(cl)
+                df.loc[i, 'Actual Toe Level\n(mPD)'] = round(float(ct) - float(cl), 3)
+                df.loc[i, 'Ground Level'] = float(gl)
+                df.loc[i, 'Concrete Top Level (mPD)'] = float(ctop)
+                df.loc[i, 'Actual Concrete Volumn (m3)'] = float(avol)
+                df.loc[i, 'Rig_Hours'] = float(rhrs)
+                df.loc[i, 'NC_Shifts'] = float(ncs)
+                df.loc[i, 'No_of_Casings'] = float(cas)
+                df.loc[i, 'Equipment_Damage'] = str(dmg)
+                df.loc[i, 'Repair_Cost_HKD'] = float(rcost)
+                df.loc[i, 'Remark'] = str(rem)
+                df.loc[i, 'Last_Edited_By'] = str(ed)
+                df.loc[i, 'Timestamp_of_Edit'] = str(ts)
 
-    df['Equipment_Damage'] = df['Equipment_Damage'].fillna('No')
+    df['Equipment_Damage'] = df['Equipment_Damage'].fillna('No').astype('object')
     df['Repair_Cost_HKD'] = pd.to_numeric(df['Repair_Cost_HKD'], errors='coerce').fillna(0.0)
     df['Rig_Hours'] = pd.to_numeric(df['Rig_Hours'], errors='coerce').fillna(0.0)
     df['NC_Shifts'] = pd.to_numeric(df['NC_Shifts'], errors='coerce').fillna(0).astype(int)
@@ -190,7 +203,7 @@ def load_data():
         if pd.isna(cid): return 'Unknown'
         p = str(cid).split('_')
         return p[0] if len(p) > 0 else 'Unknown'
-    df['Borehole_Cluster'] = df['Concrete Column ID'].apply(get_cluster)
+    df['Borehole_Cluster'] = df['Concrete Column ID'].apply(get_cluster).astype('object')
 
     df = df.sort_values(by='Concrete Column ID').reset_index(drop=True)
     grid_cols = int(np.ceil(np.sqrt(len(df)))) if len(df) > 0 else 1
@@ -201,10 +214,9 @@ def load_data():
     date_cols = ['Concrete Date\n(DD/MM/YYYY)', 'Drill Start Date \n(DD/MM/YYYY)', 'Drill Completed Date\n(DD/MM/YYYY)']
     for col in date_cols:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+            df[col] = pd.to_datetime(df[col], errors='coerce').dt.date.astype('object')
             
-    if 'Construction_Stage' not in df.columns:
-        df['Construction_Stage'] = "Not Started"
+    df['Construction_Stage'] = df['Construction_Stage'].fillna("Not Started").astype('object')
     return df
 
 # --- QUANTITY SURVEYING (QS), EVM & SUBCONTRACTOR BACK-CHARGE ENGINE ---
@@ -468,7 +480,7 @@ def generate_pdf_report(row, cap_pct=15.0, admin_pct=10.0):
     pdf.ln(10)
     pdf.cell(95, 8, "Prepared By (Site Engineer): ___________________", 0, 0)
     pdf.cell(95, 8, "Certified By (QS / Supervisor): ___________________", 0, 1)
-    return pdf.output(dest='S').encode('latin-1'), f"{col_id}_Formal_Report.pdf"
+    return pdf.output(dest='S').encode('latin-1', errors='replace'), f"{col_id}_Formal_Report.pdf"
 
 def generate_ipa_workbook(work_df, qs_summary, rates, period_label="All Active / Completed Columns"):
     wb = openpyxl.Workbook()
@@ -858,7 +870,6 @@ else:
                 st.info("No completed columns available for Subcontractor Back-Charge analysis.")
 
         with tab6:
-            # --- NEW STEP 2 TAB 6: BOREHOLE CLUSTER SPATIAL OVERBREAK HEATMAP ---
             st.markdown("### 🔥 Borehole Cluster Geotechnical Risk & Overbreak Heatmap")
             st.write("Correlating spatial borehole cluster zones with average concrete overbreak percentage and rockhead depth variations.")
             
@@ -872,8 +883,9 @@ else:
             ).reset_index()
             
             if not cluster_df.empty:
+                cluster_df['Bubble_Size'] = cluster_df['Mean_Overbreak_Pct'].fillna(5.0).clip(lower=5.0)
                 fig_heat = px.scatter(
-                    cluster_df, x='Mean_X', y='Mean_Y', size='Mean_Overbreak_Pct', color='Mean_Overbreak_Pct',
+                    cluster_df, x='Mean_X', y='Mean_Y', size='Bubble_Size', color='Mean_Overbreak_Pct',
                     hover_name='Borehole_Cluster', text='Borehole_Cluster',
                     color_continuous_scale='Reds', size_max=45,
                     labels={'Mean_Overbreak_Pct': 'Mean Overbreak (%)', 'Mean_X': 'Site X Coordinate (m)', 'Mean_Y': 'Site Y Coordinate (m)'},
@@ -883,7 +895,7 @@ else:
                 fig_heat.update_layout(height=420, plot_bgcolor='white')
                 st.plotly_chart(fig_heat, use_container_width=True)
                 
-                st.dataframe(cluster_df.rename(columns={
+                st.dataframe(cluster_df.drop(columns=['Bubble_Size']).rename(columns={
                     'Borehole_Cluster': 'Cluster Zone',
                     'Completed_Count': 'Completed Piles',
                     'Mean_Overbreak_Pct': 'Mean Overbreak (%)',
@@ -947,26 +959,26 @@ else:
                         st.error("🚨 **QA/QC Error:** Actual Founding Level cannot be higher than Ground Level. Submission blocked.")
                     else:
                         idx_m = df['Concrete Column ID'] == selected_col
-                        df.loc[idx_m, 'Construction_Stage'] = new_stage
-                        df.loc[idx_m, 'Ground Level'] = ground_level
-                        df.loc[idx_m, 'Casing Top Level\n(mPD)'] = casing_top
-                        df.loc[idx_m, 'Actual Toe Level\n(mPD)'] = act_toe
-                        df.loc[idx_m, 'Actual Founding level'] = act_founding
-                        df.loc[idx_m, 'Actual Concrete Volumn (m3)'] = concrete_vol
-                        df.loc[idx_m, 'As-built casing Length (m)'] = as_built_casing
-                        df.loc[idx_m, 'Concrete Top Level (mPD)'] = conc_top
-                        df.loc[idx_m, 'Rig_Hours'] = rig_hrs_in
+                        df.loc[idx_m, 'Construction_Stage'] = str(new_stage)
+                        df.loc[idx_m, 'Ground Level'] = float(ground_level)
+                        df.loc[idx_m, 'Casing Top Level\n(mPD)'] = float(casing_top)
+                        df.loc[idx_m, 'Actual Toe Level\n(mPD)'] = float(act_toe)
+                        df.loc[idx_m, 'Actual Founding level'] = float(act_founding)
+                        df.loc[idx_m, 'Actual Concrete Volumn (m3)'] = float(concrete_vol)
+                        df.loc[idx_m, 'As-built casing Length (m)'] = float(as_built_casing)
+                        df.loc[idx_m, 'Concrete Top Level (mPD)'] = float(conc_top)
+                        df.loc[idx_m, 'Rig_Hours'] = float(rig_hrs_in)
                         df.loc[idx_m, 'NC_Shifts'] = int(nc_shifts_in)
-                        df.loc[idx_m, 'No_of_Casings'] = casings_used_in
-                        df.loc[idx_m, 'Equipment_Damage'] = eq_dmg_in
-                        df.loc[idx_m, 'Repair_Cost_HKD'] = rep_cost_in
-                        df.loc[idx_m, 'Remark'] = remark_in
-                        df.loc[idx_m, 'Drill Start Date \n(DD/MM/YYYY)'] = start_date
+                        df.loc[idx_m, 'No_of_Casings'] = float(casings_used_in)
+                        df.loc[idx_m, 'Equipment_Damage'] = str(eq_dmg_in)
+                        df.loc[idx_m, 'Repair_Cost_HKD'] = float(rep_cost_in)
+                        df.loc[idx_m, 'Remark'] = str(remark_in)
+                        df.loc[idx_m, 'Drill Start Date \n(DD/MM/YYYY)'] = str(start_date)
                         if new_stage in ["Drilled", "Completed"]:
-                            df.loc[idx_m, 'Drill Completed Date\n(DD/MM/YYYY)'] = comp_date
+                            df.loc[idx_m, 'Drill Completed Date\n(DD/MM/YYYY)'] = str(comp_date)
                         if new_stage == "Completed":
-                            df.loc[idx_m, 'Concrete Date\n(DD/MM/YYYY)'] = conc_date
-                        df.loc[idx_m, 'Last_Edited_By'] = st.session_state['username']
+                            df.loc[idx_m, 'Concrete Date\n(DD/MM/YYYY)'] = str(conc_date)
+                        df.loc[idx_m, 'Last_Edited_By'] = str(st.session_state['username'])
                         df.loc[idx_m, 'Timestamp_of_Edit'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
                         save_path = "FYP_Concrete_Column_Data_v2.csv" if os.path.exists("FYP_Concrete_Column_Data_v2.csv") else "FYP_Concrete_Column_Data.csv"
