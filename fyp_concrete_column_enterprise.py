@@ -91,7 +91,7 @@ with st.expander("📋 View Method Statement & General Procedure"):
 
 st.markdown("---")
 
-# --- DATA LOADING & SANITIZATION (WITH STRICT PYTHON 3.14 / PANDAS DTYPE PROTECTION) ---
+# --- DATA LOADING & SANITIZATION ---
 @st.cache_data(show_spinner=False)
 def load_data():
     if os.path.exists("FYP_Concrete_Column_Data_v2.csv"):
@@ -101,12 +101,9 @@ def load_data():
     else:
         df = pd.DataFrame({"Concrete Column ID": ["BH2_1_C1", "BH2_1_C2"], "Construction_Stage": ["Not Started"]*2})
         
-    # 1. Remove Ghost Summary Row (Row 242 where Concrete Column ID is NaN)
     df = df.dropna(subset=['Concrete Column ID']).copy()
     df = df[df['Concrete Column ID'].astype(str).str.strip() != ''].reset_index(drop=True)
     
-    # 2. Explicitly enforce 'object' dtype for all text/date columns and 'float64' for numeric columns
-    # This prevents Pandas LossySetitemError / TypeError on Python 3.14 when empty CSV columns default to float64
     text_cols = [
         'Concrete Column ID', 'Construction_Stage',
         'Drill Start Date \n(DD/MM/YYYY)', 'Drill Completed Date\n(DD/MM/YYYY)', 'Concrete Date\n(DD/MM/YYYY)',
@@ -135,7 +132,6 @@ def load_data():
         else:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype("float64")
             
-    # 3. Restore Missing Design Length & Theoretical Volume Formula (+3.0m top allowance)
     len_col = 'Concrete Column Length \n(m)'
     est_col = 'Estimate Concrete volume\n(m3)'
     if df[len_col].isna().any():
@@ -150,7 +146,6 @@ def load_data():
         m_est = df[est_col].isna()
         df.loc[m_est, est_col] = np.round(CROSS_AREA * (df.loc[m_est, len_col] + 3.0), 4)
 
-    # 4. Auto-seed the 13 real site records from Standardized sheet if CSV is still unpopulated
     if (df['Construction_Stage'].fillna('Not Started') == 'Not Started').all():
         seed_records = [
             ("BH12_1_C11", "Completed", "2026-08-05", "2026-08-06", "2026-08-13", -54.430, 4.270, 59.52, 59.41, 3.61, 3.61, 25.0, 39.5, 1, 3.0, "No", 0.0, "", "Engineer", "2026-08-19 16:28:11"),
@@ -198,7 +193,6 @@ def load_data():
     df['NC_Shifts'] = pd.to_numeric(df['NC_Shifts'], errors='coerce').fillna(0).astype(int)
     df['No_of_Casings'] = pd.to_numeric(df['No_of_Casings'], errors='coerce').fillna(4.0)
     
-    # Extract Borehole Cluster Prefix
     def get_cluster(cid):
         if pd.isna(cid): return 'Unknown'
         p = str(cid).split('_')
@@ -357,6 +351,85 @@ def compute_commercial_metrics(df_in, conc_rate, soil_rate, cdg_rate, rig_rate, 
         'total_rig_hours': float(rig_h.sum())
     }
     return work_df, qs_sum
+
+# --- STEP 3: MONTE CARLO COST RISK SIMULATOR ENGINE ---
+def run_monte_carlo_simulation(
+    df_in, bac_total, ac_to_date_net, ipa_to_date,
+    conc_rate=1200.0, soil_rate=2800.0, cdg_rate=4500.0, rig_rate=1800.0,
+    sub_share=0.75, cap_pct=0.15, admin_pct=0.10, n_sims=1000,
+    depth_dev_mean=-2.4, depth_dev_std=3.0, ob_pct_mean=57.2, ob_pct_std=22.7,
+    p_damage=0.077, cost_damage=15000.0
+):
+    rem_cols = df_in[df_in['Construction_Stage'] == 'Not Started'].copy()
+    n_rem = len(rem_cols)
+    if n_rem == 0:
+        return None
+        
+    cutoff_rem = pd.to_numeric(rem_cols['Cut off level (mPD)'], errors='coerce').fillna(0.875).values
+    alluv_rem = pd.to_numeric(rem_cols['Alluvium Bottom\n(mPD)'], errors='coerce').fillna(-31.0).values
+    tent_rem = pd.to_numeric(rem_cols['Tentative Concrete Column Bottom level \n(mPD)'], errors='coerce').fillna(-41.0).values
+    d_soil_rem = np.maximum(0.0, cutoff_rem - alluv_rem)
+    
+    contra_unit_rate = conc_rate * (1.0 + admin_pct)
+    
+    # Simulation stochastic tensor: shape (n_sims, n_rem)
+    depth_dev = np.random.normal(depth_dev_mean, depth_dev_std, size=(n_sims, n_rem))
+    sim_act_f = tent_rem + depth_dev
+    sim_asbuilt_cdg = np.maximum(3.0, alluv_rem - sim_act_f)
+    sim_asbuilt_drill_len = np.maximum(10.0, cutoff_rem - sim_act_f)
+    sim_conc_len = sim_asbuilt_drill_len + 3.0
+    sim_asbuilt_cyl_vol = sim_conc_len * CROSS_AREA
+    
+    sim_ob_pct = np.clip(np.random.normal(ob_pct_mean, ob_pct_std, size=(n_sims, n_rem)), 10.0, 130.0) / 100.0
+    sim_true_ob_vol = sim_asbuilt_cyl_vol * sim_ob_pct
+    sim_act_vol = sim_asbuilt_cyl_vol + sim_true_ob_vol
+    
+    sim_allowed_cap_vol = sim_asbuilt_cyl_vol * cap_pct
+    sim_sub_backcharge_vol = np.maximum(0.0, sim_true_ob_vol - sim_allowed_cap_vol)
+    sim_sub_contra_hkd = sim_sub_backcharge_vol * contra_unit_rate
+    
+    sim_speed = np.clip(np.random.normal(2.02, 0.77, size=(n_sims, n_rem)), 0.8, 4.0)
+    sim_rig_hrs = sim_asbuilt_drill_len / sim_speed
+    sim_rig_cost = sim_rig_hrs * rig_rate
+    
+    sim_damage_mask = np.random.binomial(1, p_damage, size=(n_sims, n_rem))
+    sim_repair_cost = sim_damage_mask * cost_damage
+    
+    sim_ac_gross_per_col = (
+        (d_soil_rem * soil_rate * sub_share) +
+        (sim_asbuilt_cdg * cdg_rate * sub_share) +
+        (sim_act_vol * conc_rate) +
+        sim_rig_cost +
+        sim_repair_cost
+    )
+    sim_ac_net_per_col = sim_ac_gross_per_col - sim_sub_contra_hkd
+    
+    sim_rem_ac_net = sim_ac_net_per_col.sum(axis=1)
+    sim_rem_ipa = (
+        (d_soil_rem * soil_rate) +
+        (sim_asbuilt_cdg * cdg_rate) +
+        (sim_asbuilt_cyl_vol * conc_rate)
+    ).sum(axis=1)
+    
+    total_cost_net = ac_to_date_net + sim_rem_ac_net
+    total_revenue_ipa = ipa_to_date + sim_rem_ipa
+    total_margin = total_revenue_ipa - total_cost_net
+    
+    return {
+        'total_cost_net': total_cost_net,
+        'total_revenue_ipa': total_revenue_ipa,
+        'total_margin': total_margin,
+        'p10_cost': float(np.percentile(total_cost_net, 10)),
+        'p50_cost': float(np.percentile(total_cost_net, 50)),
+        'p90_cost': float(np.percentile(total_cost_net, 90)),
+        'p10_rev': float(np.percentile(total_revenue_ipa, 10)),
+        'p50_rev': float(np.percentile(total_revenue_ipa, 50)),
+        'p90_rev': float(np.percentile(total_revenue_ipa, 90)),
+        'p10_margin': float(np.percentile(total_margin, 10)),
+        'p50_margin': float(np.percentile(total_margin, 50)),
+        'p90_margin': float(np.percentile(total_margin, 90)),
+        'contingency_reserve': float(np.percentile(total_cost_net, 90) - bac_total)
+    }
 
 # --- EXPORT GENERATORS ---
 def format_mpd(val):
@@ -724,15 +797,16 @@ else:
     col_vis, col_data = st.columns([2.4, 1.6])
     
     with col_vis:
-        st.markdown("### 🗺️ Spatial Digital Twin, EVM S-Curve & Subcontractor Back-Charge")
+        st.markdown("### 🗺️ Spatial Digital Twin, EVM S-Curve & Stochastic Risk Simulation")
         color_map = {"Not Started": "lightgrey", "In Progress": "#f1c40f", "Drilled": "#3498db", "Completed": "#2ecc71"}
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             "2D Grid Plan",
             "3D Foundation Model",
             "📈 Time-Phased EVM S-Curve",
             "💰 Column QS & Rig Cost/m",
             "⚖️ Subcontractor Back-Charge",
-            "🔥 Cluster Risk Heatmap"
+            "🔥 Cluster Risk Heatmap",
+            "🎲 EAC & Monte Carlo Risk"
         ])
         
         with tab1:
@@ -904,6 +978,121 @@ else:
                 }), use_container_width=True)
             else:
                 st.info("Complete more columns across different clusters to view the spatial heatmap.")
+
+        with tab7:
+            # --- STEP 3: ESTIMATE AT COMPLETION (EAC) & MONTE CARLO COST RISK SIMULATOR ---
+            st.markdown("### 🎲 Estimate at Completion (EAC) & Monte Carlo Cost Risk Simulator")
+            st.write("Forecasting final project costs across the **228 remaining columns** by contrasting deterministic Earned Value (EVM) equations against a 1,000-run stochastic Monte Carlo geological and commercial simulation.")
+            
+            # Deterministic EAC Calculations
+            bac = qs_summary['total_bac_hkd']
+            ev = qs_summary['total_ev_hkd']
+            ac_net = qs_summary['total_ac_hkd']
+            cpi_net = max(0.01, qs_summary['cpi'])
+            spi_val = max(0.01, qs_summary['spi'])
+            
+            eac_opt = ac_net + (bac - ev)
+            eac_real = bac / cpi_net
+            eac_comp = ac_net + ((bac - ev) / (cpi_net * spi_val))
+            
+            vac_opt = bac - eac_opt
+            vac_real = bac - eac_real
+            vac_comp = bac - eac_comp
+            
+            st.markdown("#### 1. Deterministic EVM Forecast Scenarios")
+            d_col1, d_col2, d_col3 = st.columns(3)
+            with d_col1:
+                st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
+                st.markdown("**EAC (Optimistic): Budgeted Remaining Rate**")
+                st.metric("Forecasted Cost", f"HK${eac_opt:,.0f}", f"VAC: HK${vac_opt:,.0f}")
+                st.caption("Assumes remaining 228 columns strictly adhere to baseline design budget.")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with d_col2:
+                st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
+                st.markdown("**EAC (Realistic): Current CPI Continues**")
+                st.metric("Forecasted Cost", f"HK${eac_real:,.0f}", f"VAC: HK${vac_real:,.0f}", delta_color="inverse")
+                st.caption(f"Assumes remaining columns continue at current Net CPI = {cpi_net:.2f}.")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with d_col3:
+                st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
+                st.markdown("**EAC (Pessimistic): CPI × SPI Composite**")
+                st.metric("Forecasted Cost", f"HK${eac_comp:,.0f}", f"VAC: HK${vac_comp:,.0f}", delta_color="inverse")
+                st.caption(f"Factors in both cost overrun (CPI {cpi_net:.2f}) and schedule drag (SPI {spi_val:.2f}).")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("#### 2. Stochastic Monte Carlo Simulation (Geotechnical & Commercial Uncertainty)")
+            mc_exp = st.expander("⚙️ Adjust Monte Carlo Geotechnical & Plant Risk Parameters", expanded=False)
+            with mc_exp:
+                m_c1, m_c2, m_c3 = st.columns(3)
+                with m_c1:
+                    mc_sims = st.slider("Simulation Runs", 200, 2000, 1000, 100)
+                    mc_depth_dev = st.slider("Mean Rockhead Deviation (m)", -6.0, 1.0, -2.4, 0.2)
+                with m_c2:
+                    mc_ob_mean = st.slider("Mean Overbreak (%)", 20.0, 90.0, 57.2, 1.0)
+                    mc_ob_std = st.slider("Overbreak Std Dev (%)", 5.0, 35.0, 22.7, 1.0)
+                with m_c3:
+                    mc_p_dmg = st.slider("Casing Damage Prob (%)", 0.0, 20.0, 7.7, 0.5) / 100.0
+                    mc_dmg_cost = st.number_input("Casing Repair Cost (HKD)", value=15000.0, step=2500.0)
+
+            # Run Simulation
+            mc_res = run_monte_carlo_simulation(
+                df, bac, ac_net, qs_summary['total_claimable_ipa_hkd'],
+                conc_rate=concrete_unit_cost, soil_rate=soil_drill_rate, cdg_rate=cdg_drill_rate, rig_rate=rig_hourly_rate,
+                sub_share=sub_rate_share_pct/100.0, cap_pct=wastage_cap_pct/100.0, admin_pct=admin_markup_pct/100.0,
+                n_sims=mc_sims, depth_dev_mean=mc_depth_dev, depth_dev_std=3.0,
+                ob_pct_mean=mc_ob_mean, ob_pct_std=mc_ob_std, p_damage=mc_p_dmg, cost_damage=mc_dmg_cost
+            )
+            
+            if mc_res is not None:
+                p_c1, p_c2, p_c3, p_c4 = st.columns(4)
+                with p_c1:
+                    st.metric("Monte Carlo P10 (Best 10%)", f"HK${mc_res['p10_cost']:,.0f}")
+                with p_c2:
+                    st.metric("Monte Carlo P50 (Expected Median)", f"HK${mc_res['p50_cost']:,.0f}")
+                with p_c3:
+                    st.metric("Monte Carlo P90 (Risk Threshold)", f"HK${mc_res['p90_cost']:,.0f}")
+                with p_c4:
+                    st.metric("Contingency Reserve (P90 - BAC)", f"+HK${mc_res['contingency_reserve']:,.0f}", delta_color="inverse")
+                    
+                st.caption(f"Expected Client Billable Revenue at Completion (P50): **HK${mc_res['p50_rev']:,.0f}** | Expected Net Margin at Completion (P50): **HK${mc_res['p50_margin']:,.0f}**")
+
+                # Visualizations
+                mc_cost_m = mc_res['total_cost_net'] / 1e6
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Histogram(
+                    x=mc_cost_m, nbinsx=40, name='Simulated Final Net Cost',
+                    marker_color='#3498db', opacity=0.75
+                ))
+                fig_hist.add_vline(x=bac / 1e6, line_width=2.5, line_dash="dash", line_color="#2c3e50", annotation_text=f"BAC: HK${bac/1e6:.2f}M")
+                fig_hist.add_vline(x=mc_res['p10_cost'] / 1e6, line_width=2, line_color="#27ae60", annotation_text=f"P10: HK${mc_res['p10_cost']/1e6:.2f}M")
+                fig_hist.add_vline(x=mc_res['p50_cost'] / 1e6, line_width=2.5, line_color="#f39c12", annotation_text=f"P50: HK${mc_res['p50_cost']/1e6:.2f}M")
+                fig_hist.add_vline(x=mc_res['p90_cost'] / 1e6, line_width=2.5, line_color="#c0392b", annotation_text=f"P90: HK${mc_res['p90_cost']/1e6:.2f}M")
+                fig_hist.update_layout(
+                    title=f"A. Probability Density Distribution of Final Net Contractor Cost ({mc_sims:,} Simulations)",
+                    xaxis_title="Final Net Contractor Cost (HKD $ Millions)", yaxis_title="Frequency Count",
+                    height=360, plot_bgcolor='white'
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+                
+                # Comparison Horizontal Bar Chart
+                fig_cmp = go.Figure()
+                cmp_names = ['Baseline BAC', 'EAC (Optimistic)', 'EAC (Realistic)', 'EAC (Pessimistic)', 'Monte Carlo P10', 'Monte Carlo P50', 'Monte Carlo P90']
+                cmp_vals = [
+                    bac / 1e6, eac_opt / 1e6, eac_real / 1e6, eac_comp / 1e6,
+                    mc_res['p10_cost'] / 1e6, mc_res['p50_cost'] / 1e6, mc_res['p90_cost'] / 1e6
+                ]
+                cmp_colors = ['#2c3e50', '#2980b9', '#e67e22', '#c0392b', '#27ae60', '#f39c12', '#962d22']
+                fig_cmp.add_trace(go.Bar(
+                    y=cmp_names, x=cmp_vals, orientation='h',
+                    marker_color=cmp_colors, text=[f"HK${v:.2f}M" for v in cmp_vals], textposition='outside'
+                ))
+                fig_cmp.add_vline(x=bac / 1e6, line_width=1.5, line_dash="dash", line_color="#2c3e50")
+                fig_cmp.update_layout(
+                    title="B. Benchmark Comparison: Deterministic EVM Forecasts vs. Stochastic Monte Carlo",
+                    xaxis_title="Forecasted Total Cost at Completion (HKD $ Millions)",
+                    height=350, plot_bgcolor='white', xaxis=dict(range=[0, max(cmp_vals) * 1.15])
+                )
+                st.plotly_chart(fig_cmp, use_container_width=True)
 
     with col_data:
         st.markdown("### 📝 Record As-Built & Plant Data")
