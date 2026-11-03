@@ -75,6 +75,12 @@ with st.sidebar:
     admin_markup_pct = st.slider("Contra-Charge Admin / Handling Fee (%)", min_value=0.0, max_value=25.0, value=10.0, step=1.0)
     sub_rate_share_pct = st.slider("Subcontractor Drilling BOQ Share (%)", min_value=50.0, max_value=95.0, value=75.0, step=5.0)
 
+    st.markdown("---")
+    st.header("⏱️ Contract Schedule & Liquidated Damages (LD)")
+    contract_deadline = st.date_input("Target Contract Completion Date", value=datetime.date(2027, 4, 30))
+    ld_daily_rate = st.number_input("Daily Liquidated Damages (HKD/day)", value=50000.0, step=5000.0)
+    rig_mob_cost = st.number_input("Rig Mobilization Cost (HKD/rig)", value=250000.0, step=25000.0)
+
 st.title("🏢 Enterprise Digital Twin: Scheduling, Engineering & QS Cost Control")
 
 with st.expander("📋 View Method Statement & General Procedure"):
@@ -372,7 +378,6 @@ def run_monte_carlo_simulation(
     
     contra_unit_rate = conc_rate * (1.0 + admin_pct)
     
-    # Simulation stochastic tensor: shape (n_sims, n_rem)
     depth_dev = np.random.normal(depth_dev_mean, depth_dev_std, size=(n_sims, n_rem))
     sim_act_f = tent_rem + depth_dev
     sim_asbuilt_cdg = np.maximum(3.0, alluv_rem - sim_act_f)
@@ -773,23 +778,21 @@ else:
         
     with top_col4:
         st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-        st.markdown("**📅 Period & Forecast Analysis**")
-        today = datetime.date.today()
-        date_range = st.date_input("Filter Production & IPA Date Range", value=(datetime.date(2026, 7, 20), today), format="YYYY-MM-DD")
-        if len(date_range) == 2:
-            s_d, e_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-            d_dates = pd.to_datetime(df['Drill Completed Date\n(DD/MM/YYYY)'], errors='coerce')
-            c_dates = pd.to_datetime(df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce')
-            d_cnt = int(((d_dates >= s_d) & (d_dates <= e_d)).sum())
-            c_cnt = int(((c_dates >= s_d) & (c_dates <= e_d)).sum())
-            st.write(f"**In Period:** {d_cnt} Drilled | {c_cnt} Concreted")
+        st.markdown("**📅 Schedule & LD Exposure**")
         if not completed_df.empty:
-            c_dt = pd.to_datetime(completed_df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce').dropna()
+            c_dt = pd.to_datetime(completed_df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce').dropna().sort_values()
             if len(c_dt) > 1:
                 elap = max(1, (c_dt.max() - c_dt.min()).days)
                 rate = len(c_dt) / elap
-                proj = c_dt.max() + datetime.timedelta(days=remaining_cols / rate)
-                st.info(f"**Rate:** {rate:.2f}/day → **Est. End:** {proj.strftime('%d %b %Y')}")
+                proj_finish = c_dt.max().date() + datetime.timedelta(days=int(np.ceil(remaining_cols / rate)))
+                delay_days_top = max(0, (proj_finish - contract_deadline).days)
+                ld_top_hkd = delay_days_top * ld_daily_rate
+                st.metric("Projected Delay", f"+{delay_days_top} Days", f"LD Risk: HK${ld_top_hkd:,.0f}", delta_color="inverse" if delay_days_top > 0 else "normal")
+                st.caption(f"Target: {contract_deadline.strftime('%d %b %Y')} | Est. Finish: {proj_finish.strftime('%d %b %Y')} (@ {rate:.2f} cols/day)")
+            else:
+                st.info("Need more completed columns to project schedule delay.")
+        else:
+            st.info("Log completed columns to track critical path delay.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("---")
@@ -799,14 +802,15 @@ else:
     with col_vis:
         st.markdown("### 🗺️ Spatial Digital Twin, EVM S-Curve & Stochastic Risk Simulation")
         color_map = {"Not Started": "lightgrey", "In Progress": "#f1c40f", "Drilled": "#3498db", "Completed": "#2ecc71"}
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
             "2D Grid Plan",
             "3D Foundation Model",
             "📈 Time-Phased EVM S-Curve",
             "💰 Column QS & Rig Cost/m",
             "⚖️ Subcontractor Back-Charge",
             "🔥 Cluster Risk Heatmap",
-            "🎲 EAC & Monte Carlo Risk"
+            "🎲 EAC & Monte Carlo Risk",
+            "⏱️ Delay & Liquidated Damages (LD)"
         ])
         
         with tab1:
@@ -980,11 +984,9 @@ else:
                 st.info("Complete more columns across different clusters to view the spatial heatmap.")
 
         with tab7:
-            # --- STEP 3: ESTIMATE AT COMPLETION (EAC) & MONTE CARLO COST RISK SIMULATOR ---
             st.markdown("### 🎲 Estimate at Completion (EAC) & Monte Carlo Cost Risk Simulator")
             st.write("Forecasting final project costs across the **228 remaining columns** by contrasting deterministic Earned Value (EVM) equations against a 1,000-run stochastic Monte Carlo geological and commercial simulation.")
             
-            # Deterministic EAC Calculations
             bac = qs_summary['total_bac_hkd']
             ev = qs_summary['total_ev_hkd']
             ac_net = qs_summary['total_ac_hkd']
@@ -1034,7 +1036,6 @@ else:
                     mc_p_dmg = st.slider("Casing Damage Prob (%)", 0.0, 20.0, 7.7, 0.5) / 100.0
                     mc_dmg_cost = st.number_input("Casing Repair Cost (HKD)", value=15000.0, step=2500.0)
 
-            # Run Simulation
             mc_res = run_monte_carlo_simulation(
                 df, bac, ac_net, qs_summary['total_claimable_ipa_hkd'],
                 conc_rate=concrete_unit_cost, soil_rate=soil_drill_rate, cdg_rate=cdg_drill_rate, rig_rate=rig_hourly_rate,
@@ -1056,7 +1057,6 @@ else:
                     
                 st.caption(f"Expected Client Billable Revenue at Completion (P50): **HK${mc_res['p50_rev']:,.0f}** | Expected Net Margin at Completion (P50): **HK${mc_res['p50_margin']:,.0f}**")
 
-                # Visualizations
                 mc_cost_m = mc_res['total_cost_net'] / 1e6
                 fig_hist = go.Figure()
                 fig_hist.add_trace(go.Histogram(
@@ -1074,7 +1074,6 @@ else:
                 )
                 st.plotly_chart(fig_hist, use_container_width=True)
                 
-                # Comparison Horizontal Bar Chart
                 fig_cmp = go.Figure()
                 cmp_names = ['Baseline BAC', 'EAC (Optimistic)', 'EAC (Realistic)', 'EAC (Pessimistic)', 'Monte Carlo P10', 'Monte Carlo P50', 'Monte Carlo P90']
                 cmp_vals = [
@@ -1093,6 +1092,143 @@ else:
                     height=350, plot_bgcolor='white', xaxis=dict(range=[0, max(cmp_vals) * 1.15])
                 )
                 st.plotly_chart(fig_cmp, use_container_width=True)
+
+        with tab8:
+            # --- STEP 4: LIQUIDATED DAMAGES (LD) & CRITICAL PATH DELAY CALCULATOR ---
+            st.markdown("### ⏱️ Critical Path Delay & Liquidated Damages (LD) Calculator")
+            st.write(
+                "Linking construction schedule progress directly to commercial delay penalties (GCC Clause 52 / NEC4 Option X7). "
+                "Evaluating whether mobilizing additional piling rigs to crash the schedule is financially justified against daily Liquidated Damages liabilities."
+            )
+            
+            target_completion_dt = contract_deadline
+            n_rem = remaining_cols
+            
+            if not completed_df.empty:
+                c_dt_series = pd.to_datetime(completed_df['Concrete Date\n(DD/MM/YYYY)'], errors='coerce').dropna().sort_values()
+                if len(c_dt_series) > 1:
+                    status_dt = c_dt_series.max().date()
+                    elap_days = max(1, (c_dt_series.max() - c_dt_series.min()).days)
+                    base_rate_1rig = len(c_dt_series) / elap_days
+                else:
+                    status_dt = datetime.date(2026, 8, 30)
+                    base_rate_1rig = 0.40
+            else:
+                status_dt = datetime.date(2026, 8, 30)
+                base_rate_1rig = 0.40
+                
+            days_to_deadline = (target_completion_dt - status_dt).days
+            
+            # Scenario 1: 1 Rig (Do Nothing / Base Rate)
+            days_needed_s1 = n_rem / base_rate_1rig if base_rate_1rig > 0 else 999
+            finish_s1 = status_dt + datetime.timedelta(days=int(np.ceil(days_needed_s1)))
+            delay_s1 = max(0, (finish_s1 - target_completion_dt).days)
+            ld_cost_s1 = delay_s1 * ld_daily_rate
+            accel_s1 = 0.0
+            net_benefit_s1 = 0.0
+            
+            # Scenario 2: 2 Rigs (Accelerated, 90% spatial efficiency)
+            rate_2rig = base_rate_1rig * 2.0 * 0.90
+            days_needed_s2 = n_rem / rate_2rig if rate_2rig > 0 else 999
+            finish_s2 = status_dt + datetime.timedelta(days=int(np.ceil(days_needed_s2)))
+            delay_s2 = max(0, (finish_s2 - target_completion_dt).days)
+            ld_cost_s2 = delay_s2 * ld_daily_rate
+            accel_s2 = rig_mob_cost * 1.0
+            net_benefit_s2 = (ld_cost_s1 - ld_cost_s2) - accel_s2
+            
+            # Scenario 3: 3 Rigs (Full Recovery, 80% spatial efficiency)
+            rate_3rig = base_rate_1rig * 3.0 * 0.80
+            days_needed_s3 = n_rem / rate_3rig if rate_3rig > 0 else 999
+            finish_s3 = status_dt + datetime.timedelta(days=int(np.ceil(days_needed_s3)))
+            delay_s3 = max(0, (finish_s3 - target_completion_dt).days)
+            ld_cost_s3 = delay_s3 * ld_daily_rate
+            accel_s3 = rig_mob_cost * 2.0
+            net_benefit_s3 = (ld_cost_s1 - ld_cost_s3) - accel_s3
+            
+            st.markdown("#### 1. Strategic Crashing Scenario Matrix")
+            s_col1, s_col2, s_col3 = st.columns(3)
+            with s_col1:
+                st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
+                st.markdown("**Option A: Base Case (1 Rig)**")
+                st.metric("Projected Finish", finish_s1.strftime('%d %b %Y'), f"+{delay_s1} Days Delay", delta_color="inverse" if delay_s1 > 0 else "normal")
+                st.metric("Gross LD Liability", f"HK${ld_cost_s1:,.0f}")
+                st.caption(f"Rate: {base_rate_1rig:.2f} cols/day | Mob Cost: HK$0")
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+            with s_col2:
+                st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
+                st.markdown("**Option B: Mobilize 2nd Rig (Accelerated)**")
+                st.metric("Projected Finish", finish_s2.strftime('%d %b %Y'), f"+{delay_s2} Days Delay", delta_color="inverse" if delay_s2 > 0 else "normal")
+                st.metric("Net Commercial Savings", f"+HK${net_benefit_s2:,.0f}", f"LD: HK${ld_cost_s2:,.0f}")
+                st.caption(f"Rate: {rate_2rig:.2f} cols/day (90% eff.) | Mob: HK${accel_s2:,.0f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+            with s_col3:
+                st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
+                st.markdown("**Option C: Mobilize 3 Rigs (Full Recovery)**")
+                st.metric("Projected Finish", finish_s3.strftime('%d %b %Y'), f"+{delay_s3} Days Delay (On Time)" if delay_s3 == 0 else f"+{delay_s3} Days", delta_color="normal" if delay_s3 == 0 else "inverse")
+                st.metric("Net Commercial Savings", f"+HK${net_benefit_s3:,.0f}", f"LD: HK${ld_cost_s3:,.0f}")
+                st.caption(f"Rate: {rate_3rig:.2f} cols/day (80% eff.) | Mob: HK${accel_s3:,.0f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("#### 2. Visual Schedule & Commercial Trade-Off")
+            # Panel A: Milestone Horizontal Bar Chart
+            scen_names = ['Target Contract Deadline', 'Scenario 1 (1 Rig)', 'Scenario 2 (2 Rigs)', 'Scenario 3 (3 Rigs)']
+            finish_dates = [target_completion_dt, finish_s1, finish_s2, finish_s3]
+            days_from_status = [(d - status_dt).days for d in finish_dates]
+            bar_colors = ['#2c3e50', '#c0392b', '#f39c12', '#27ae60']
+            
+            fig_gantt = go.Figure()
+            fig_gantt.add_trace(go.Bar(
+                y=scen_names, x=days_from_status, orientation='h',
+                marker_color=bar_colors,
+                text=[f"{d.strftime('%d %b %Y')} ({'+' + str(max(0, (d - target_completion_dt).days)) + 'd' if (d - target_completion_dt).days > 0 else 'On Time'})" for d in finish_dates],
+                textposition='outside'
+            ))
+            fig_gantt.add_vline(x=days_to_deadline, line_width=2, line_dash="dash", line_color="#2c3e50", annotation_text="Contract Deadline")
+            fig_gantt.update_layout(
+                title=f"A. Projected Completion Milestones vs. Target Contract Deadline ({target_completion_dt.strftime('%d %b %Y')})",
+                xaxis_title=f"Calendar Days from Status Date ({status_dt.strftime('%d %b %Y')})",
+                height=320, plot_bgcolor='white', xaxis=dict(range=[0, max(days_from_status) * 1.25])
+            )
+            st.plotly_chart(fig_gantt, use_container_width=True)
+
+            # Panel B: Cost Trade-off Chart
+            fig_trade = go.Figure()
+            categories = ['1 Rig (Do Nothing)', '2 Rigs (Accelerated)', '3 Rigs (Recovered)']
+            fig_trade.add_trace(go.Bar(name='Gross LD Liability', x=categories, y=[ld_cost_s1/1e6, ld_cost_s2/1e6, ld_cost_s3/1e6], marker_color='#c0392b'))
+            fig_trade.add_trace(go.Bar(name='Rig Mobilization Cost', x=categories, y=[accel_s1/1e6, accel_s2/1e6, accel_s3/1e6], marker_color='#f39c12'))
+            fig_trade.add_trace(go.Bar(name='Net Commercial Savings', x=categories, y=[net_benefit_s1/1e6, net_benefit_s2/1e6, net_benefit_s3/1e6], marker_color='#27ae60'))
+            fig_trade.update_layout(
+                barmode='group', title=f"B. Commercial Trade-off: LD Liability (@ HK${ld_daily_rate:,.0f}/day) vs. Rig Acceleration Cost (HK$ Millions)",
+                yaxis_title="HKD $ Millions", height=340, plot_bgcolor='white'
+            )
+            st.plotly_chart(fig_trade, use_container_width=True)
+
+            # Interactive Crashing Simulator
+            with st.expander("🎛️ Custom Multi-Rig Crashing & Shift Simulator", expanded=False):
+                c_s1, c_s2, c_s3 = st.columns(3)
+                with c_s1:
+                    sim_rigs = st.slider("Select Working Rig Count", 1, 4, 2, 1)
+                with c_s2:
+                    sim_eff = st.slider("Site Logistics Congestion Efficiency (%)", 50, 100, 90 if sim_rigs == 2 else (80 if sim_rigs == 3 else 70), 5) / 100.0
+                with c_s3:
+                    sim_shift_hrs = st.slider("Daily Working Shift Hours", 8, 12, 10, 1)
+                    
+                eff_speed_multiplier = (sim_shift_hrs / 10.0) * sim_eff
+                sim_rate = base_rate_1rig * sim_rigs * eff_speed_multiplier
+                sim_days = int(np.ceil(n_rem / sim_rate)) if sim_rate > 0 else 999
+                sim_finish = status_dt + datetime.timedelta(days=sim_days)
+                sim_delay = max(0, (sim_finish - target_completion_dt).days)
+                sim_ld = sim_delay * ld_daily_rate
+                sim_mob = max(0, sim_rigs - 1) * rig_mob_cost
+                sim_net_gain = (ld_cost_s1 - sim_ld) - sim_mob
+                
+                sim_m1, sim_m2, sim_m3, sim_m4 = st.columns(4)
+                with sim_m1: st.metric("Simulated Production Rate", f"{sim_rate:.2f} cols/day")
+                with sim_m2: st.metric("Simulated Completion Date", sim_finish.strftime('%d %b %Y'))
+                with sim_m3: st.metric("Simulated Delay", f"{sim_delay} Days", delta_color="inverse" if sim_delay > 0 else "normal")
+                with sim_m4: st.metric("Net Commercial Savings", f"+HK${sim_net_gain:,.0f}", f"LD: HK${sim_ld:,.0f}")
 
     with col_data:
         st.markdown("### 📝 Record As-Built & Plant Data")
@@ -1238,5 +1374,4 @@ else:
             'Sub_Backcharge_Vol_m3', 'True_Wastage_Cost_HKD', 'Sub_Total_Contra_Charge_HKD',
             'Net_MC_Unrecovered_Wastage_HKD', 'Sub_Gross_Valuation_HKD', 'Sub_Net_Payable_HKD',
             'Rig_Hours', 'NC_Shifts', 'Equipment_Damage', 'Repair_Cost_HKD', 'Last_Edited_By', 'Timestamp_of_Edit'
-        ] if c in filtered_df.columns]
-        st.dataframe(filtered_df[cols_show], use_container_width=True, height=340)
+        ] if c in filtered
