@@ -1365,13 +1365,15 @@ else:
             else:
                 st.info("Commercial IPA, Contra-Charge & Official PDF exports require Admin privileges (`admin123`).")
 
-    # --- ADVANCED DATA VIEW ---
+  # --- ADVANCED DATA VIEW ---
     st.markdown("---")
     with st.expander("📂 View Complete Database (Engineering, QS Valuation, Subcontractor Back-Charge & Audit Trail)"):
-        cols_show = [c for c in [
+        desired_cols = [
             'Concrete Column ID', 'Construction_Stage', 'Borehole_Cluster', 'AsBuilt_Cylinder_Vol_m3', 'Actual Concrete Volumn (m3)',
             'True_Radial_Overbreak_Vol_m3', 'True_Overbreak_Pct', 'Allowed_Wastage_Cap_Vol_m3', 'MC_Absorbed_Overbreak_Vol_m3',
             'Sub_Backcharge_Vol_m3', 'True_Wastage_Cost_HKD', 'Sub_Total_Contra_Charge_HKD',
             'Net_MC_Unrecovered_Wastage_HKD', 'Sub_Gross_Valuation_HKD', 'Sub_Net_Payable_HKD',
             'Rig_Hours', 'NC_Shifts', 'Equipment_Damage', 'Repair_Cost_HKD', 'Last_Edited_By', 'Timestamp_of_Edit'
-        ] if c in filtered
+        ]
+        cols_show = [c for c in desired_cols if c in filtered_df.columns]
+        st.dataframe(filtered_df[cols_show], use_container_width=True, height=340)
